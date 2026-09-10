@@ -1,0 +1,17 @@
+# 统一换行符，避免 Windows / Linux 协作者之间产生无意义的 diff
+* text=auto eol=lf
+
+# Windows 脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件不做任何转换
+*.ico binary
+*.dll binary
+*.exe binary
+*.png binary
+
+# 文档与源码的语言标记（GitHub 统计更准）
+*.md text
+*.py text

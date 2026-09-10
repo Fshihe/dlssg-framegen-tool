@@ -1,0 +1,27 @@
+# 构建产物
+dist/
+work/
+build/
+*.spec
+
+# 上游代理 DLL —— 不入库，用 tools/fetch_payload.py 从上游获取
+# （这样仓库本身不再分发这些二进制，来源也更清楚）
+payload/*.dll
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地杂项
+*.log
+诊断包-*.txt
