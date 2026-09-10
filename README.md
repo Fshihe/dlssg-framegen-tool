@@ -52,7 +52,7 @@
 还不行就取个证，命令行跑：
 
 ```
-DLSSG帧生成一键开启工具.exe collect "游戏目录"
+dlssg-cn.exe collect "游戏目录"
 ```
 
 诊断包会生成在 `%LOCALAPPDATA%\DLSSG-SM86-Tool\reports\`，
@@ -117,15 +117,15 @@ dll 带自签名证书，可以在文件属性 →「数字签名」里看到。
 同一个 exe 也能当命令行用：
 
 ```
-DLSSG帧生成一键开启工具.exe detect                看显卡环境
-DLSSG帧生成一键开启工具.exe list --d3d12          列出能装的游戏
-DLSSG帧生成一键开启工具.exe check "<目录>"        安装前预检
-DLSSG帧生成一键开启工具.exe plan "<目录>"         预演，不写入
-DLSSG帧生成一键开启工具.exe install "<目录>" -y   安装
-DLSSG帧生成一键开启工具.exe uninstall "<目录>"    卸载
-DLSSG帧生成一键开启工具.exe hags                  查硬件加速GPU计划
-DLSSG帧生成一键开启工具.exe collect "<目录>"      收集诊断包
-DLSSG帧生成一键开启工具.exe selftest              85 项自检
+dlssg-cn.exe detect                看显卡环境
+dlssg-cn.exe list --d3d12          列出能装的游戏
+dlssg-cn.exe check "<目录>"        安装前预检
+dlssg-cn.exe plan "<目录>"         预演，不写入
+dlssg-cn.exe install "<目录>" -y   安装
+dlssg-cn.exe uninstall "<目录>"    卸载
+dlssg-cn.exe hags                  查硬件加速GPU计划
+dlssg-cn.exe collect "<目录>"      收集诊断包
+dlssg-cn.exe selftest              85 项自检
 ```
 
 ## 自己编译

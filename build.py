@@ -25,8 +25,8 @@ WORK = ROOT / "work"
 sys.path.insert(0, str(SRC))
 from dgcore.payload_manifest import MANIFEST  # noqa: E402
 
-APP_BASENAME = "DLSSG-FrameGen-Tool"
-FRIENDLY_NAME = "DLSSG帧生成一键开启工具"
+# 产物名一律用 ASCII —— 中文名在 GitHub Release、部分解压工具和国外网盘上会乱码
+APP_BASENAME = "dlssg-cn"
 
 
 def sha256(path: Path) -> str:
@@ -116,13 +116,8 @@ def pyinstaller(slim: bool) -> Path:
     if not built.is_file():
         raise SystemExit(f"没有找到产物：{built}")
 
-    friendly = DIST / f"{FRIENDLY_NAME}.exe"
-    if friendly.exists():
-        friendly.unlink()
-    shutil.copy2(built, friendly)
     print(f"\n  产物：{built}")
-    print(f"        {friendly}")
-    return friendly
+    return built
 
 
 def verify_build(exe: Path) -> None:
