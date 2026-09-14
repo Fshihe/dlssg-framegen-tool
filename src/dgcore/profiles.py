@@ -190,6 +190,23 @@ def describe_all() -> str:
 
 TOOL_NAME_LINE = "; 由 DLSSG 帧生成一键开启工具生成"
 
+# 识别"这份 INI 是不是本工具写的"的稳定标记。
+#
+# 曾经踩过的坑：生成时写的是「DLSSG 帧生成一键开启工具」，但识别时
+# 用的字符串漏了「帧生成」两个字，导致防护失效 —— 卸载时把工具自己
+# 生成的 ini 当成"用户的原始文件"又还原回了游戏目录。
+#
+# 现在两边共用这一个常量，不会再漂移。检测时用宽松匹配（不含版本号
+# 等易变部分），只要带工具署名就算我们的。
+OUR_INI_MARKER = "DLSSG 帧生成一键开启工具"
+
+
+def is_our_ini(text: str) -> bool:
+    """判断一段 INI 内容是不是本工具生成的。"""
+    if not text:
+        return False
+    return OUR_INI_MARKER in text or TOOL_NAME_LINE in text
+
 
 def build_ini(
     profile: Profile,
@@ -312,4 +329,7 @@ __all__ = [
     "build_ini",
     "read_ini_router",
     "detect_ini_version",
+    "is_our_ini",
+    "TOOL_NAME_LINE",
+    "OUR_INI_MARKER",
 ]

@@ -22,6 +22,7 @@ from pathlib import Path
 from . import DEFAULT_PROXY, INI_NAME, PROXY_ENTRIES, UPSTREAM_VERSION
 from . import proc
 from . import profiles
+from .profiles import is_our_ini
 from . import winenv
 from .gpu import VERDICT_OK, VERDICT_NOT_NEEDED
 from .paths import (
@@ -1069,7 +1070,8 @@ def uninstall(target_dir: str | Path, force: bool = False) -> UninstallResult:
         # 这种情况出现在：用户反复安装/卸载，或上一次卸载没清干净。
         if name == INI_NAME:
             try:
-                if "由 DLSSG 一键开启工具生成" in b.read_text("utf-8", "ignore"):
+                text = b.read_text("utf-8", "ignore")
+                if is_our_ini(text):
                     journal("skip_restore_own_ini", path=str(b))
                     log(f"备份的 {name} 是本工具生成的，不再还原", "warn")
                     continue

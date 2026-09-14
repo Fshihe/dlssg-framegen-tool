@@ -901,6 +901,47 @@ def run(verbose: bool = True) -> Runner:
             r.check("CLI：含中文和特殊字符时正常输出", False, f"{type(_e).__name__}: {_e}")
 
         # ------------------------------------------------------------------
+        # 17d. 卸载绝不能把"工具自己生成的 INI"还原回去
+        #      真实踩过：残留检测用的标记字符串漏了「帧生成」三个字，
+        #      导致防护静默失效，卸载后游戏目录里多出一份工具生成的 ini。
+        #      这里对两个 upstream 版本各测一遍，并直接校验标记函数。
+        # ------------------------------------------------------------------
+        for _v in ("0.2.4", "0.3.0"):
+            _ini_text = installer.build_ini("SM86", 0, 3, 1, version=_v)
+            r.check(
+                f"INI 标记：{_v} 生成的 INI 能被 is_our_ini 认出",
+                profiles.is_our_ini(_ini_text),
+                _ini_text.splitlines()[0] if _ini_text else "(空)",
+            )
+        r.check("INI 标记：非本工具的 INI 不会被误认",
+                not profiles.is_our_ini("[Compatibility]\nRouter=SM86\n"))
+        r.check("INI 标记：空内容不会被误认", not profiles.is_our_ini(""))
+
+        # 端到端：先装一次（产生一份"我们自己的 ini"），卸载后目录必须干净
+        gdirK = tmp / "GameK"
+        edK = _make_fake_game(gdirK, foreign=False)
+        installer.execute_plan(
+            installer.make_plan(
+                edK, edK / "FakeGame-Win64-Shipping.exe", "version.dll", "SM86", "GameK"
+            )
+        )
+        # 把 ini 改掉，让下一次安装把它当作"需要备份的原始文件"
+        (edK / INI_NAME).write_text(
+            installer.build_ini("SM86", 0, 3, 1) + "; 用户随手加了点东西\n", "utf-8"
+        )
+        installer.execute_plan(
+            installer.make_plan(
+                edK, edK / "FakeGame-Win64-Shipping.exe", "version.dll", "SM86", "GameK"
+            )
+        )
+        urK = installer.uninstall(edK)
+        r.check(
+            "反复往返：卸载后不会把工具自己的 INI 还原回来",
+            not (edK / INI_NAME).exists(),
+            f"残留 {sorted(p.name for p in edK.iterdir())}；{urK.message}",
+        )
+
+        # ------------------------------------------------------------------
         # 18. 路径安全：状态与备份只落在 LOCALAPPDATA
         # ------------------------------------------------------------------
         r.check(
