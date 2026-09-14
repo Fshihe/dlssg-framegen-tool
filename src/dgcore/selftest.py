@@ -332,6 +332,52 @@ def run(verbose: bool = True) -> Runner:
             cp6.advice,
         )
 
+        # 组件存在 ≠ 游戏开放了功能（帕鲁反例），措辞必须留余地
+        r.check(
+            "预判：组件齐全时不会说死「一定能开」",
+            "装上就能开" not in cp6.headline and "看看" in cp6.advice or "有没有" in cp6.advice,
+            f"{cp6.headline} / {cp6.advice[:80]}",
+        )
+
+        # 组件藏在插件深层目录时也要能找到（UE 游戏都是这个布局）
+        deep = tmp / "DeepGame" / "Proj" / "Plugins" / "StreamlineCore" / "Binaries" / "ThirdParty" / "Win64"
+        deep.mkdir(parents=True, exist_ok=True)
+        (deep / "nvngx_dlssg.dll").write_bytes(b"x")
+        (deep / "sl.dlss_g.dll").write_bytes(b"x")
+        exe_dir_deep = tmp / "DeepGame" / "Proj" / "Binaries" / "Win64"
+        exe_dir_deep.mkdir(parents=True, exist_ok=True)
+        found_deep = capability._find_components(exe_dir_deep, capability.FG_COMPONENTS)
+        r.check(
+            "预判：能在插件深层目录找到帧生成组件",
+            "nvngx_dlssg.dll" in found_deep,
+            f"{found_deep}",
+        )
+        cp7 = capability.predict("Deep-Win64-Shipping.exe", exe_dir_deep, "confirmed", True)
+        r.check(
+            "预判：深层组件也能被预判采纳",
+            cp7.level == capability.Support.GOOD,
+            f"{cp7.level.value}: {cp7.headline}",
+        )
+
+        # 结构回归：插件根列表里有重复项时，不能因为"见过"就放弃后面所有候选。
+        # 踩过：原来写的是 `if ... or pr in seen: break`，遇到重复的
+        # <项目>\Plugins 就直接跳出整个循环，永远轮不到 Engine\Plugins ——
+        # 而黑神话的组件恰恰在 Engine\Plugins 里（深度 6）。
+        deep2 = tmp / "Deep2" / "Engine" / "Plugins" / "Runtime" / "Nvidia" / \
+            "Streamline" / "Binaries" / "ThirdParty" / "Win64"
+        deep2.mkdir(parents=True, exist_ok=True)
+        (deep2 / "nvngx_dlssg.dll").write_bytes(b"x")
+        proj_plug = tmp / "Deep2" / "Proj" / "Plugins"
+        proj_plug.mkdir(parents=True, exist_ok=True)   # 空的项目 Plugins（会排在前面的重复项）
+        exe_dir_deep2 = tmp / "Deep2" / "Proj" / "Binaries" / "Win64"
+        exe_dir_deep2.mkdir(parents=True, exist_ok=True)
+        got6 = capability._find_components(exe_dir_deep2, ("nvngx_dlssg.dll",))
+        r.check(
+            "预判：前面的插件根为空时仍会继续找后面的（深度 6 也不能漏）",
+            "nvngx_dlssg.dll" in got6,
+            f"找到 {got6}",
+        )
+
         # ------------------------------------------------------------------
         # 2f. 双 profile 适配层（0.2.4 / 0.3.0）
         # ------------------------------------------------------------------

@@ -56,9 +56,12 @@ class Prediction:
 
 
 # 已知只提供 DLSS 超分、没有帧生成功能的游戏
-# 来源：评论区反馈 + 上游 README。用文件名/游戏名做宽松匹配。
+# 来源：评论区反馈 + 实测确认。用文件名/游戏名做宽松匹配。
+#
+# 注意这里记的是「游戏没开放功能」，不是「文件不存在」——
+# 《幻兽帕鲁》就是反例：组件一应俱全，但游戏 UI 没给帧生成开关。
 KNOWN_NO_FG = {
-    "palworld": "《幻兽帕鲁》只有 DLSS 超分，没有帧生成功能",
+    "palworld": "《幻兽帕鲁》只有 DLSS 超分，没有开放帧生成",
     "stardew": "《星露谷物语》是像素游戏，不涉及 DLSS",
     "goose goose": "《鹅鸭杀》走 Vulkan，且带反作弊",
 }
@@ -81,6 +84,145 @@ def _dir_has(d: Path, names) -> list[str]:
         except OSError:
             pass
     return out
+
+
+def _find_components(root: Path | None, names) -> list[str]:
+    """在 EXE 所在目录**及其所属游戏目录**里找组件。
+
+    为什么不能只看同目录：UE 游戏（黑神话、帕鲁）把插件放在
+        <游戏>\\<项目>\\Plugins\\...\\Binaries\\ThirdParty\\Win64\\
+    这类深层目录里，只看 EXE 旁边会漏判成"没有组件"。
+
+    但也不能随便往上翻 —— 曾经用 `**/名字` 递归查找，结果会翻到游戏目录
+    之外（测试时甚至串到了别的临时目录），既慢又会误判。
+
+    所以改成**只认已知的插件布局**：
+      · EXE 同目录
+      · 从 EXE 往上找「游戏根」，特征是同级有 Engine 目录
+      · 只在这些根下的 <项目>/Plugins、Engine/Plugins 里按固定层级找
+    找到就返回，不做无界递归。
+    """
+    if root is None:
+        return []
+    root = Path(root)
+    found: set[str] = set()
+
+    def scan(d: Path) -> None:
+        for n in names:
+            try:
+                if (d / n).is_file():
+                    found.add(n)
+            except OSError:
+                pass
+
+    # 1) EXE 同目录
+    scan(root)
+
+    # 2) 找游戏根候选：往上最多 4 层，边走边收集。
+    #
+    #    识别特征有两个，命中任一即认为是根：
+    #      · 同级有 Engine 目录（标准 UE 布局）
+    #      · 同级有 <某项目>/Plugins 目录（有些打包方式没有 Engine）
+    #    找不到就只用 EXE 同目录的结果 —— 不能无界往上翻。
+    roots: list[Path] = []
+    cur = root
+    for _ in range(4):
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+        roots.append(cur)
+
+    game_root: Path | None = None
+    plugin_roots: list[Path] = []
+
+    for cand in roots:
+        try:
+            has_engine = (cand / "Engine").is_dir()
+            # 找同级的 <项目>/Plugins
+            proj_plugins: list[Path] = []
+            for entry in cand.iterdir():
+                if not entry.is_dir():
+                    continue
+                p = entry / "Plugins"
+                if p.is_dir():
+                    proj_plugins.append(p)
+                # 也覆盖 <项目>/Plugins 直接在候选目录下的情况
+            if has_engine or proj_plugins:
+                game_root = cand
+                plugin_roots.extend(proj_plugins)
+                eng = cand / "Engine" / "Plugins"
+                if eng.is_dir():
+                    plugin_roots.append(eng)
+                break
+            # 候选目录本身就是 Plugins 的父级
+            if (cand / "Plugins").is_dir():
+                plugin_roots.append(cand / "Plugins")
+        except OSError:
+            continue
+
+    # 没有识别到游戏根，但 EXE 目录上方就是 Plugins 时也扫一下
+    if not plugin_roots:
+        for cand in roots:
+            try:
+                p = cand / "Plugins"
+                if p.is_dir():
+                    plugin_roots.append(p)
+                    break
+            except OSError:
+                continue
+        # 还有一种布局：EXE 在 .../Binaries/Win64，插件在 .../Plugins
+        for cand in roots:
+            try:
+                if cand.name.lower() in ("win64", "binaries"):
+                    continue
+                if (cand / "Plugins").is_dir():
+                    plugin_roots.append(cand / "Plugins")
+            except OSError:
+                continue
+
+    if not plugin_roots:
+        return sorted(found)
+
+    # 去重并保持顺序（识别根时可能同时收进相同的 Plugins 路径）
+    deduped: list[Path] = []
+    for p in plugin_roots:
+        if p not in deduped:
+            deduped.append(p)
+    plugin_roots = deduped
+
+    # 3) 在插件根下按固定层级找。
+    #
+    #    实测两种布局的深度：
+    #      帕鲁      : Plugins/StreamlineCore/Binaries/ThirdParty/Win64/  → 4 层
+    #      黑神话    : Engine/Plugins/Runtime/Nvidia/Streamline/Binaries/ThirdParty/Win64/ → 6 层
+    #    所以深度要给够（这里到 7），但仍然是有界的 —— 不用 ** 无界递归，
+    #    那样会翻出游戏目录，既慢又会串到别的游戏。
+    seen: set[Path] = set()
+    for pr in plugin_roots[:12]:
+        if len(found) == len(names):
+            break
+        if pr in seen:
+            # 注意：这里必须 continue 而不是 break ——
+            # plugin_roots 里可能混有重复项（根目录识别时会同时收
+            # <项目>/Plugins 和 Engine/Plugins，某些布局下两者相同），
+            # 用 break 会在遇到重复项时直接放弃后面所有候选。
+            continue
+        seen.add(pr)
+        for n in names:
+            if n in found:
+                continue
+            try:
+                for depth in range(1, 8):
+                    pat = "/".join(["*"] * depth) + f"/{n}"
+                    hit = next((x for x in pr.glob(pat) if x.is_file()), None)
+                    if hit is not None:
+                        found.add(n)
+                        break
+            except OSError:
+                continue
+
+    return sorted(found)
 
 
 def _known_no_multiplier(exe_name: str, game_name: str) -> str:
@@ -121,8 +263,9 @@ def predict(
     d = Path(exe_dir)
     p = Prediction()
 
-    fg = _dir_has(d, FG_COMPONENTS)
-    sr = _dir_has(d, SR_COMPONENTS)
+    # 先看同目录（快），没有再往插件目录里找（UE 游戏都在深层）
+    fg = _dir_has(d, FG_COMPONENTS) or _find_components(d, FG_COMPONENTS)
+    sr = _dir_has(d, SR_COMPONENTS) or _find_components(d, SR_COMPONENTS)
 
     # ---- 硬性阻断：图形 API 不对 ----
     if not api_can_install:
@@ -155,15 +298,20 @@ def predict(
             p.reasons.append(note)
             return p
 
-    # ---- 有帧生成组件：最好情况 ----
+    # ---- 有帧生成组件 ----
+    #
+    # 注意：组件存在 ≠ 游戏开放了这个功能。
+    # 反例《幻兽帕鲁》：nvngx_dlssg.dll / sl.dlss_g.dll 一应俱全，
+    # EXE 里也有 slDLSSGSetOptions 的调用链，但游戏 UI 根本没给帧生成开关。
+    # 所以措辞要留余地，别让用户以为"文件在就一定能开"。
     if fg:
         p.level = Support.GOOD
-        p.headline = "这个游戏自带 DLSS 帧生成组件，装上就能开"
+        p.headline = "这个游戏带了帧生成组件"
         p.reasons.append(f"同目录有 {', '.join(fg)}")
         # 已知这个游戏不给倍率选择的话，明确点出来，免得用户以为工具没生效
         no_mult = _known_no_multiplier(exe_name, game_name)
         if no_mult:
-            p.headline = f"这个游戏自带帧生成组件，但只有「开/关」没有倍率选择"
+            p.headline = f"{no_mult}带了帧生成组件，但只有「开/关」没有倍率选择"
             p.reasons.append(f"{no_mult}的帧生成是二选一开关，固定按 2X 跑")
             p.advice = (
                 "装完完全退出游戏再启动，在画面设置里打开「帧生成」。\n"
@@ -173,7 +321,10 @@ def predict(
             )
         else:
             p.advice = (
-                "装完完全退出游戏再启动，在画面设置里打开「帧生成」。\n"
+                "组件齐全说明游戏技术上支持，但能不能开还取决于游戏有没有"
+                "把这个开关放到画面上。\n"
+                "进去看画面设置里有没有「帧生成 / Frame Generation」这一项："
+                "有的话打开就行；没有的话就是游戏没开放，工具无法强行打开。\n"
                 + MULTIPLIER_NOTE
             )
         return p
