@@ -1223,6 +1223,7 @@ def preflight(
     fg_input: str = "upscaler",
 ) -> list[Check]:
     """OptiScaler 引擎的安装前预检。有任何 error 就不该继续。"""
+    from . import ueconfig
     from .state import ENGINE_OPTISCALER, conflict_message, other_engine_install
 
     target_dir = Path(target_dir)
@@ -1343,7 +1344,33 @@ def preflight(
     elif anticheat is not None:
         out.append(Check("ok", "未检测到反作弊组件"))
 
-    # 7) payload 完整性
+    # 9.5) FGInput=upscaler 的硬前提：超分器必须真的在跑。
+    #       UE 自带的 TSR 是引擎内部实现，OptiScaler 钩不到，
+    #       游戏里选了 TSR 的话 XeFG 永远拿不到输入、永远不激活 ——
+    #       界面上只表现为"没效果"，完全看不出原因。帕鲁实测就栽在这。
+    if (fg_input or "").lower() == "upscaler":
+        kind, raw = ueconfig.read_upscaler(target_dir)
+        if kind == "internal":
+            out.append(Check(
+                "warn", f"游戏当前用的是 {raw}，不是 DLSS/FSR/XeSS",
+                "FGInput=upscaler 的含义是「拿超分器的输入来插帧」，"
+                "所以超分器必须真的在运行。\n"
+                "TSR/TAA 是虚幻引擎内部实现，OptiScaler 钩不到 —— "
+                "这种情况下 XeFG 不会激活，界面上只表现为「没效果」。\n\n"
+                "请在游戏的画面设置里把抗锯齿/超分改成 **DLSS**（或 FSR / XeSS），"
+                "重启游戏后再看。",
+            ))
+        elif kind == "external":
+            out.append(Check("ok", f"游戏超分设置可用（{raw}）",
+                             "超分器是外部库，OptiScaler 能钩到它的输入"))
+        else:
+            out.append(Check(
+                "warn", "读不到游戏的超分设置",
+                "进游戏后在画面设置里确认抗锯齿/超分选的是 DLSS（或 FSR / XeSS）"
+                "而不是 TSR，否则 FGInput=upscaler 拿不到输入。",
+            ))
+
+    # 10) payload 完整性
     ok, msg = bundle_available(bundle)
     if ok:
         out.append(Check("ok", "内置引擎包完整性校验通过", f"{spec.display_name}：{msg}"))
@@ -1362,8 +1389,6 @@ def preflight(
         out.append(Check("ok", f"倍率 {mult}X", multiplier_label(mult)))
 
     # 9) 游戏配置（虚幻引擎）：必须关掉 dilated motion vectors
-    from . import ueconfig
-
     path, how = ueconfig.find_engine_ini(target_dir)
     if path is None:
         out.append(Check(

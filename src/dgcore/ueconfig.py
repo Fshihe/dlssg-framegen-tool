@@ -560,16 +560,90 @@ def describe(target_dir: str | Path) -> str:
             else f"尚未关闭 dilated motion vectors（{path}）")
 
 
+# --------------------------------------------------------------------------
+# 游戏内的超分设置
+# --------------------------------------------------------------------------
+#
+# FGInput=upscaler 的含义是"拿超分器的输入来插帧" —— 所以**超分器必须真的在跑**。
+# 虚幻引擎自带的 TSR 是引擎内部实现，OptiScaler 钩不到它。
+# 游戏里要是选的 TSR（而不是 DLSS/FSR/XeSS），XeFG 就永远拿不到输入、
+# 永远不激活 —— 界面上只是"没效果"，看不出任何原因。
+#
+# 帕鲁实测就栽在这：AntiAliasingType=AAM_TSR。
+
+# 认得出是"外部超分库"的类型（OptiScaler 能钩）
+_UPSCALER_OK = ("dlss", "fsr", "xess", "amf", "dlaa")
+# 引擎内建 / 关掉的
+_UPSCALER_INTERNAL = ("tsr", "taa", "none", "off", "fxaa")
+
+
+def find_game_user_settings(target_dir: str | Path) -> Path | None:
+    """找 GameUserSettings.ini（游戏里的画质设置存在这儿）。"""
+    ini, _how = find_engine_ini(target_dir)
+    if ini is not None:
+        p = ini.parent / "GameUserSettings.ini"
+        if p.is_file():
+            return p
+    # 兜底：项目目录里翻一下
+    root = project_root(target_dir)
+    if root is not None:
+        for base in (root, root.parent):
+            p = base / "Saved" / "Config" / "Windows" / "GameUserSettings.ini"
+            if p.is_file():
+                return p
+    return None
+
+
+def read_upscaler(target_dir: str | Path) -> tuple[str, str]:
+    """读游戏当前使用的抗锯齿/超分类型。
+
+    返回 (类别, 原始值)：
+        "external" —— DLSS/FSR/XeSS 之类，OptiScaler 能钩
+        "internal" —— TSR/TAA 之类引擎内建，钩不到（upscaler 输入会失效）
+        "unknown"  —— 读不到
+
+    全文件搜索而不是按节找：这个键的位置是**游戏自定义**的。
+    帕鲁放在 `/Script/Pal.PalGameLocalSettings` 里，别的游戏可能在
+    `[ScalabilitySettings]`。写死节名必然漏。
+    """
+    p = find_game_user_settings(target_dir)
+    if p is None:
+        return "unknown", ""
+
+    text = read_text(p)
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith(";") or "=" not in s:
+            continue
+        k, _, v = s.partition("=")
+        if k.strip().lower() != "antialiasingtype":
+            continue
+        val = v.strip()
+        bare = val.lower().replace("aam_", "")
+        if any(x in bare for x in _UPSCALER_OK):
+            return "external", val
+        if any(x in bare for x in _UPSCALER_INTERNAL):
+            return "internal", val
+        return "unknown", val
+
+    return "unknown", ""
+
+
 __all__ = [
     "CVAR_SECTION",
     "CVAR_KEY",
     "CVAR_VALUE",
     "UeConfigResult",
+    "CvarEdit",
     "project_root",
     "find_engine_ini",
+    "find_game_user_settings",
+    "read_upscaler",
     "has_cvar",
+    "has_our_mark",
     "apply_cvar",
     "strip_cvar",
+    "strip_orphan",
     "ensure_dilate_off",
     "restore_dilate",
     "describe",

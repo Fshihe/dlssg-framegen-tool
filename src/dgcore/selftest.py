@@ -1469,6 +1469,52 @@ def run(verbose: bool = True) -> Runner:
         r.check("UE 配置兜底：用户配置保持原样",
                 _orph_ini.read_text(encoding="utf-8") == _user)
 
+        # 20g. 读游戏内的超分类型。
+        #   FGInput=upscaler 要求"超分器必须真的在跑"，而 UE 自带的 TSR
+        #   OptiScaler 钩不到。帕鲁实测就卡在这：AntiAliasingType=AAM_TSR，
+        #   界面上只表现为"没效果"，完全看不出原因。
+        #   这个键的位置是**游戏自定义**的（帕鲁放在 /Script/Pal.PalGameLocalSettings），
+        #   所以必须全文件找，不能写死节名。
+        _us = tmp / "UEGame4"
+        _us_win64 = _us / "Binaries" / "Win64"
+        _us_win64.mkdir(parents=True)
+        (_us_win64 / "G-Win64-Shipping.exe").write_bytes(b"MZ")
+        _cfgdir = _us / "Saved" / "Config" / "Windows"
+        _cfgdir.mkdir(parents=True)
+        _gus = _cfgdir / "GameUserSettings.ini"
+
+        _upscaler_cases = {
+            "TSR（引擎内建，钩不到）": ("internal", "AAM_TSR"),
+            "TAA（引擎内建）": ("internal", "AAM_TAA"),
+            "DLSS（可用）": ("external", "AAM_DLSS"),
+            "FSR2（可用）": ("external", "AAM_FSR2"),
+            "XeSS（可用）": ("external", "AAM_XeSS"),
+        }
+        for _name, (_want_kind, _val) in _upscaler_cases.items():
+            _gus.write_text(
+                "[ScalabilityGroups]\nsg.AntiAliasingQuality=1\n\n"
+                f"[/Script/Pal.PalGameLocalSettings]\nAntiAliasingType={_val}\n",
+                encoding="utf-8", newline="",
+            )
+            _k, _v = ue.read_upscaler(_us_win64)
+            r.check(f"UE 超分识别：{_name}", _k == _want_kind and _v == _val,
+                    f"got=({_k},{_v}) want=({_want_kind},{_val})")
+
+        # 读不到时要报 unknown，不能瞎猜
+        _gus.write_text("[ScalabilityGroups]\nsg.AntiAliasingQuality=1\n",
+                        encoding="utf-8", newline="")
+        r.check("UE 超分识别：没有这个键时报 unknown",
+                ue.read_upscaler(_us_win64)[0] == "unknown")
+
+        # 预检必须把 TSR 这件事说出来（这是最容易被误判成"游戏不支持"的情形）
+        _gus.write_text("[/Script/Pal.PalGameLocalSettings]\nAntiAliasingType=AAM_TSR\n",
+                        encoding="utf-8", newline="")
+        _tsr_checks = oi.preflight(_us_win64, "optiscaler-xess", 4,
+                                   running_names=[], fg_input="upscaler")
+        r.check("UE 超分识别：预检会提示改用 DLSS",
+                any("AAM_TSR" in c.title for c in _tsr_checks),
+                str([c.title for c in _tsr_checks]))
+
     finally:
         # 恢复用户真实状态
         try:
