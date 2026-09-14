@@ -63,6 +63,14 @@ KNOWN_NO_FG = {
     "goose goose": "《鹅鸭杀》走 Vulkan，且带反作弊",
 }
 
+# 已知「帧生成只有开/关、不提供倍率选择」的游戏 —— 这类游戏固定跑 2X。
+# 用户会以为选了 4X 没生效，其实游戏根本没请求那么多帧。
+# 匹配串尽量用可执行文件名，避免中文/英文名不一致。
+KNOWN_NO_MULTIPLIER = {
+    "b1-win64-shipping": "《黑神话：悟空》",
+    "blackmythwukong": "《黑神话：悟空》",
+}
+
 
 def _dir_has(d: Path, names) -> list[str]:
     out = []
@@ -75,8 +83,31 @@ def _dir_has(d: Path, names) -> list[str]:
     return out
 
 
+def _known_no_multiplier(exe_name: str, game_name: str) -> str:
+    """这个游戏是不是已知「只有开/关、不给倍率选择」。是则返回游戏名。"""
+    low = f"{exe_name or ''} {game_name or ''}".lower()
+    for key, label in KNOWN_NO_MULTIPLIER.items():
+        if key in low:
+            return label
+    return ""
+
+
 FG_COMPONENTS = ("nvngx_dlssg.dll", "sl.dlss_g.dll")
 SR_COMPONENTS = ("nvngx_dlss.dll", "sl.dlss.dll", "nvngx_dlssd.dll")
+
+# 「倍率上限」这个坑值得在每个提示里说一遍。
+#
+# 真实反馈：用户在工具里选了 4X，进游戏发现只有 2 倍效果（60 -> 100）。
+# 原因不是工具没生效，而是《黑神话：悟空》的帧生成只有「开/关」，
+# 游戏自己固定请求 1 个生成帧（2X）。MaxGeneratedFrames 是**上限**，
+# 游戏不请求，写多少都没用。
+#
+# 按上游说明：实际生成帧数由游戏请求，并钳到运行库上限。
+MULTIPLIER_NOTE = (
+    "注意：「最高倍率」只是个上限，实际用几倍由游戏决定。\n"
+    "游戏只有「开/关」没有倍率选项的话（黑神话就是这样），"
+    "它固定按 2X 跑，改上限不会有变化 —— 这是游戏侧的限制。"
+)
 
 
 def predict(
@@ -129,7 +160,22 @@ def predict(
         p.level = Support.GOOD
         p.headline = "这个游戏自带 DLSS 帧生成组件，装上就能开"
         p.reasons.append(f"同目录有 {', '.join(fg)}")
-        p.advice = "装完完全退出游戏再启动，在画面设置里打开「帧生成」。"
+        # 已知这个游戏不给倍率选择的话，明确点出来，免得用户以为工具没生效
+        no_mult = _known_no_multiplier(exe_name, game_name)
+        if no_mult:
+            p.headline = f"这个游戏自带帧生成组件，但只有「开/关」没有倍率选择"
+            p.reasons.append(f"{no_mult}的帧生成是二选一开关，固定按 2X 跑")
+            p.advice = (
+                "装完完全退出游戏再启动，在画面设置里打开「帧生成」。\n"
+                f"这个游戏只给「开/关」，所以最高倍率选什么都没区别 —— "
+                "它只会生成 1 帧（2X）。\n"
+                "想跑更高倍率需要游戏自己支持倍率选择。"
+            )
+        else:
+            p.advice = (
+                "装完完全退出游戏再启动，在画面设置里打开「帧生成」。\n"
+                + MULTIPLIER_NOTE
+            )
         return p
 
     # ---- 有超分但没帧生成组件 ----
@@ -155,4 +201,13 @@ def predict(
     return p
 
 
-__all__ = ["Support", "Prediction", "predict", "FG_COMPONENTS", "SR_COMPONENTS"]
+__all__ = [
+    "Support",
+    "Prediction",
+    "predict",
+    "FG_COMPONENTS",
+    "SR_COMPONENTS",
+    "MULTIPLIER_NOTE",
+    "KNOWN_NO_FG",
+    "KNOWN_NO_MULTIPLIER",
+]

@@ -527,8 +527,13 @@ class App(tk.Tk):
 
         # 说明文字
         hint = f"将使用上游 {prof.version}（{prof.explanation}）"
+        hint += (
+            "\n「最高倍率」只是允许的上限 —— 实际用几倍由游戏决定。"
+            "游戏只有「开/关」没有倍率选项的话（黑神话就是），它固定按 2X 跑，改上限不会有变化。"
+        )
         if router == "SM75":
             hint += "\n⚠ 20 系为实验性支持：上游 0.3.0 已移除 SM75 内核，本工具自动改用 0.2.4。"
+        # 说明文字：讲清「上限」的含义 + 当前用哪个 profile
         try:
             self.frames_hint.configure(
                 text=hint, foreground=C_WARN if router == "SM75" else C_DIM

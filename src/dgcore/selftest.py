@@ -309,6 +309,29 @@ def run(verbose: bool = True) -> Runner:
         cp4 = capability.predict("Palworld-Win64-Shipping.exe", _capdir, "confirmed", True, "Palworld")
         r.check("预判：已知游戏被识别", cp4.level == capability.Support.UNLIKELY, cp4.level.value)
 
+        # 倍率上限这个坑（真实反馈：选了 4X 但只有 2 倍效果，
+        # 因为黑神话的帧生成只有「开/关」，游戏固定请求 1 帧）
+        (_capdir / "sl.dlss_g.dll").write_bytes(b"x")
+        cp5 = capability.predict(
+            "b1-Win64-Shipping.exe", _capdir, "confirmed", True, "Black Myth: Wukong"
+        )
+        r.check(
+            "预判：黑神话会被标注「只有开/关、固定 2X」",
+            "开/关" in cp5.headline,
+            cp5.headline,
+        )
+        r.check(
+            "预判：建议里说明选倍率上限没用",
+            "选什么都没区别" in cp5.advice or "2X" in cp5.advice,
+            cp5.advice,
+        )
+        cp6 = capability.predict("SomeGame-Win64-Shipping.exe", _capdir, "confirmed", True)
+        r.check(
+            "预判：其他游戏给出通用的倍率说明",
+            "上限" in cp6.advice and "由游戏决定" in cp6.advice,
+            cp6.advice,
+        )
+
         # ------------------------------------------------------------------
         # 2f. 双 profile 适配层（0.2.4 / 0.3.0）
         # ------------------------------------------------------------------
