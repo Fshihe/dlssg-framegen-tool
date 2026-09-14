@@ -76,36 +76,59 @@
 
 想换引擎：先在这游戏上点「卸载并还原」，再选另一个引擎装。
 
-### 先说风险：这个引擎可能让游戏起不来
+### 关键：虚幻引擎游戏必须关掉 dilated motion vectors
 
-**OptiScaler 会钩住 D3D12 和交换链，能不能跑完全看具体游戏。**
+**这是"装上了、菜单显示 4X、但帧数一点没变"的头号原因。**
 
-黑神话基准测试上实测出现过**「打开就闪退」**（用 `--fg-input dlssg` 时）。
-出问题不要慌，直接卸载即可完全还原 —— 游戏自带文件一个都不会被改动，
+OptiScaler 官方说明：UE 游戏用 Upscaler 输入配 DLSS 时，必须关掉
+dilated motion vectors，否则 XeFG 每一帧都失败：
+
+```
+[E] XeFG Log: XeFG: Invalid argument.
+    motion vector and depth resource resolutions must match.
+```
+
+工具会**自动**往游戏的 `Engine.ini` 写入这一行（并显示改的是哪个文件）：
+
+```ini
+[SystemSettings]
+r.NGX.DLSS.DilateMotionVectors=0
+```
+
+另一条官方要求：**XeFG 在独占全屏下不工作**，所以工具默认打开
+`ForceBorderless`（强制无边框窗口）。
+
+改的是你的游戏配置文件，所以做得比较严：改前备份，
+卸载时**按当初的实际情况精确撤销** —— 原本有这个键就改回原值、
+原本没这个节才删节头、文件是我们新建的就直接删。自检覆盖了
+CRLF/LF、空文件、无换行结尾等 8 种输入的**逐字节往返比对**。
+
+### 怎么确认真的生效了（官方判据）
+
+比看帧数可靠：
+
+1. 菜单里开 **Debug View** —— 能看到**粉色竖线**就说明 XeFG 在工作
+2. **帧时间会变厚（约一倍）但应该平坦** —— 这是 Intel 版 Flip Metering
+3. XeFG 有时需要**先激活一次、再重启游戏**，设置才会完全生效
+
+游戏目录下的 `OptiScaler.log` 里如果没有 `[E]` 行，就是正常的。
+
+### 已知限制
+
+- **XeFG 不支持 Vulkan**
+- **黑神话的 DLSSG 输入需要 [OptiPatcher](https://github.com/optiscaler/OptiPatcher)**（第三方 ASI 插件，本工具未包含）
+- 帕鲁里 Streamline 自己拒绝了 DLSS-G（`not supported on current hardware`）——
+  RTX 30 不是 Ada，所以帕鲁只能用 `upscaler` 输入
+- `--fg-input dlssg` 需要**先在游戏里打开帧生成**，否则 OptiScaler 会处于无效状态。
+  实测这个状态会让游戏闪退，所以工具会在预检阶段拦住
+
+### 风险
+
+OptiScaler 会钩住 D3D12 和交换链，兼容性完全取决于具体游戏。
+出问题直接卸载即可完全还原 —— 游戏自带文件一个都不会被改动，
 这一点有逐字节比对验证过。
 
-所以：**只想安稳用帧生成的话，用引擎一（DLSSG）。** 引擎二留给愿意折腾的游戏。
-
-### 装完没效果怎么办
-
-XeSS 引擎默认会把日志写在游戏目录下的 `OptiScaler.log`。
-**如果感觉帧数没变，先看这个文件里有没有 `[E]` 开头的行。**
-
-已知的一个硬伤：XeFG 要求运动矢量和深度缓冲**分辨率一致**，
-而黑神话用的是 dilated motion vectors，XeFG 不接受，
-每一帧都会失败，日志里刷满：
-
-```
-[E] XeFG Log: XeFG: Invalid argument. motion vector and depth resource resolutions must match.
-```
-
-OptiScaler 自己的界面上也写着 **「Requires disabling dilated motion vectors」**。
-所以**黑神话上 XeSS 帧生成是不通的**，不是设置问题。
-详见 `docs/XeSS引擎-黑神话实测.md`。
-
-`--fg-input dlssg`（改走游戏自身 Streamline 通道）试过了，**会让游戏闪退** ——
-因为那条通道需要游戏里先开启帧生成，否则 OptiScaler 会停在无效状态。
-工具现在会在预检阶段拦住这种情况。**不建议再试。**
+**只想安稳用帧生成的话，用引擎一（DLSSG）。** 引擎二留给愿意折腾的游戏。
 
 ### 关于 XeSS 引擎包的来源
 

@@ -1328,6 +1328,107 @@ def run(verbose: bool = True) -> Runner:
         r.check("编排：卸载后无残留", left_orch == {"FakeGame-Win64-Shipping.exe"},
                 str(sorted(left_orch)))
 
+        # ------------------------------------------------------------------
+        # 20. 虚幻引擎配置（Engine.ini）—— XeFG 能不能工作的真正前提
+        #
+        #   OptiScaler 官方说明：UE 游戏用 Upscaler 输入配 DLSS 时，必须
+        #   关掉 dilated motion vectors，否则 XeFG 每帧失败（表现为
+        #   "菜单显示 4X 但帧数没变"）。黑神话与幻兽帕鲁都栽在这。
+        #   这一步动的是用户的游戏配置文件，所以还原必须逐字节精确。
+        # ------------------------------------------------------------------
+        from . import ueconfig as ue
+
+        r.eq("UE 配置：cvar 键名", ue.CVAR_KEY, "r.NGX.DLSS.DilateMotionVectors")
+        r.eq("UE 配置：cvar 节名", ue.CVAR_SECTION, "SystemSettings")
+
+        # 20a. 各种输入下都必须逐字节往返
+        _ue_cases = {
+            "LF": b"[Core.System]\nPaths=x\n\n[Accessibility]\nA=False\n",
+            "CRLF": b"[Core.System]\r\nPaths=x\r\n\r\n[Accessibility]\r\nA=False\r\n",
+            "已有该键(值1)": b"[SystemSettings]\r\nr.NGX.DLSS.DilateMotionVectors=1\r\n",
+            "已有空节": b"[SystemSettings]\n",
+            "节在末尾无换行": b"[A]\nx=1\n\n[SystemSettings]\ny=2",
+            "空文件": b"",
+            "只有换行": b"\r\n\r\n",
+            "带注释": b"[SystemSettings]\n; comment\nfoo=1\n",
+        }
+        for _name, _src in _ue_cases.items():
+            _t = _src.decode("utf-8")
+            _new, _edit = ue.apply_cvar(_t)
+            _back, _ch = ue.strip_cvar(_new, _edit)
+            r.check(f"UE 配置往返：{_name}",
+                    ue.has_cvar(_new) and _back == _t,
+                    f"写入={ue.has_cvar(_new)} 还原={_back == _t}")
+
+        # 关键回归：用户原本把该键设成 1，撤销时必须改回 1，而不是删掉整行
+        _t1 = "[SystemSettings]\nr.NGX.DLSS.DilateMotionVectors=1\n"
+        _n1, _e1 = ue.apply_cvar(_t1)
+        _b1, _ = ue.strip_cvar(_n1, _e1)
+        r.check("UE 配置：原本的值必须改回去而不是删掉", _b1 == _t1, repr(_b1))
+        r.check("UE 配置：原本就有节时不删节头",
+                "[SystemSettings]" in _b1)
+
+        # 20b. 定位：从 Binaries\Win64 推断项目根
+        _ue_root = tmp / "UEGame"
+        _ue_win64 = _ue_root / "Binaries" / "Win64"
+        _ue_win64.mkdir(parents=True)
+        _ue_ini = _ue_root / "Saved" / "Config" / "Windows" / "Engine.ini"
+        _ue_ini.parent.mkdir(parents=True)
+        _ue_orig = "[Core.System]\nPaths=x\n"
+        _ue_ini.write_text(_ue_orig, encoding="utf-8", newline="")
+        r.eq("UE 配置：能推断出项目根", ue.project_root(_ue_win64), _ue_root.resolve()
+             if ue.project_root(_ue_win64) else None)
+        _found, _how = ue.find_engine_ini(_ue_win64)
+        r.check("UE 配置：能找到 Engine.ini", _found == _ue_ini, str(_found))
+
+        # 20c. 真实写盘 → 卸载后逐字节还原
+        _ue_before = _ue_ini.read_bytes()
+        _ue_res = ue.ensure_dilate_off(_ue_win64)
+        r.check("UE 配置：写入成功", _ue_res.ok and _ue_res.changed, _ue_res.detail)
+        r.check("UE 配置：写入后确实生效", ue.has_cvar(ue.read_text(_ue_ini)))
+        r.check("UE 配置：用户原有内容未被破坏",
+                "Paths=x" in ue.read_text(_ue_ini))
+        # 幂等
+        _again = ue.ensure_dilate_off(_ue_win64)
+        r.check("UE 配置：重复执行不重复写", _again.ok and not _again.changed, _again.detail)
+        # 撤销
+        _rb = ue.restore_dilate(_ue_win64, _ue_res.edit, created=_ue_res.created)
+        r.check("UE 配置：撤销成功", _rb.ok, _rb.detail)
+        r.check("UE 配置：撤销后逐字节还原", _ue_ini.read_bytes() == _ue_before,
+                f"{_ue_ini.read_bytes()!r} != {_ue_before!r}")
+
+        # 20d. 走完整安装链路：装 → Engine.ini 被改 / 卸 → 逐字节还原
+        _ue2 = tmp / "UEGame2"
+        _ue2_win64 = _ue2 / "Binaries" / "Win64"
+        _ue2_win64.mkdir(parents=True)
+        (_ue2_win64 / "FakeGame-Win64-Shipping.exe").write_bytes(b"MZ")
+        _ue2_ini = _ue2 / "Saved" / "Config" / "Windows" / "Engine.ini"
+        _ue2_ini.parent.mkdir(parents=True)
+        _ue2_ini.write_bytes(b"[Core.System]\r\nPaths=x\r\n")
+        _ue2_before = _ue2_ini.read_bytes()
+
+        st.forget_install(_ue2_win64)
+        _oi = oi.install(_ue2_win64, _ue2_win64 / "FakeGame-Win64-Shipping.exe",
+                         "optiscaler-xess", 4, game_name="UEGame2")
+        r.check("UE 配置：OptiScaler 安装成功", _oi.success, _oi.message)
+        r.check("UE 配置：安装时自动关闭了 dilated MV",
+                ue.has_cvar(ue.read_text(_ue2_ini)))
+        _rec2 = st.find_install(_ue2_win64)
+        r.check("UE 配置：改动被记进状态（卸载才有据可依）",
+                bool((_rec2 or {}).get("ue_config", {}).get("changed")),
+                str((_rec2 or {}).get("ue_config")))
+        _un2 = oi.uninstall_installed(_ue2_win64)
+        r.check("UE 配置：卸载成功", _un2.success, _un2.message)
+        r.check("UE 配置：卸载后 Engine.ini 逐字节还原",
+                _ue2_ini.read_bytes() == _ue2_before,
+                f"{_ue2_ini.read_bytes()!r} != {_ue2_before!r}")
+
+        # 20e. 非 UE 目录不该被误判
+        _plain = tmp / "PlainGame"
+        _plain.mkdir(parents=True)
+        _pf, _phow = ue.find_engine_ini(_plain)
+        r.check("UE 配置：非虚幻布局不误报", _pf is None, str(_pf))
+
     finally:
         # 恢复用户真实状态
         try:

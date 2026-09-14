@@ -315,7 +315,7 @@ def normalize_multiplier(mult: int) -> int:
 
 def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
               log_level: int | None = 2, high_res_mv: bool | None = None,
-              fg_input: str = "upscaler") -> str:
+              fg_input: str = "upscaler", force_borderless: bool = True) -> str:
     """生成 OptiScaler.ini：模板 + 定点修改 + 我们自己的署名头。
 
     log_level:
@@ -326,18 +326,14 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
         True / False → 显式设定 XeFG.HighResMV
         None         → 不覆盖，跟随上游 auto（默认）
 
-        留成 None 是**基于实测的谨慎**：黑神话上无论 auto 还是 true 都失败
-        （auto 3694 次报错 / true 6781 次报错，都是每帧一错），
-        没有任何证据表明 true 更好。既然没证据，就不该替用户改上游默认值。
-        这个开关留给别的游戏试 —— 取决于游戏把 MV 放在哪个分辨率。
-
     fg_input:
         "upscaler" → 用游戏超分的输入（不要求游戏自带帧生成）
-        "dlssg"    → 用游戏自身 DLSSG（Streamline）的输入
+        "dlssg"    → 用游戏自身 DLSSG（Streamline）的输入。
+                      **需要先在游戏里打开帧生成**，否则会处于无效状态、可能导致闪退。
 
-        黑神话在 upscaler 模式下每帧都失败（MV/深度分辨率不匹配），
-        dlssg 模式改走游戏自己的 Streamline 通道，输入由引擎生成、
-        尺寸是对齐的，是下一个值得试的方向。
+    force_borderless:
+        XeFG 在**独占全屏下根本不工作**（OptiScaler 官方说明），所以默认强制
+        无边框窗口。这是"菜单里显示 4X 但帧数没变"的常见原因之一。
     """
     spec = get_bundle(key)
     if spec is None:
@@ -366,6 +362,10 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
     text = _set_in_section(text, "XeFG", "InterpolationCount", str(interp))
     text = _set_in_section(text, "XeFG", "UnlockMFG", "true" if unlock else "false")
     text = _set_in_section(text, "XeFG", "MaxInterpolatedFrames", str(interp))
+
+    # 独占全屏下 XeFG 不工作 —— 强制无边框
+    text = _set_in_section(text, "XeFG", "ForceBorderless",
+                           "true" if force_borderless else "false")
 
     # 运动矢量分辨率：默认不动（见 docstring）
     if high_res_mv is not None:
@@ -535,15 +535,17 @@ def detect_ours(target_dir: str | Path) -> dict[str, str]:
             if p.is_file() and try_hash(p) == h:
                 found[spec.install_rel(rel)] = h
 
-    # 3) 生成的 INI：只有确认其它文件是我们的，才连带认它
-    if found:
-        ini = target_dir / INI_NAME
-        if ini.is_file():
-            try:
-                if is_our_ini(ini.read_text("utf-8", "ignore")):
-                    found[INI_NAME] = try_hash(ini)
-            except OSError:
-                pass
+    # 3) 生成的 INI：署名是我们独有的，单独就能认。
+    #    不能要求"先认到别的文件才认它" —— 半途失败的安装（DLL 没写成、
+    #    或用户删了 DLL 留下 INI）会让这份残留既不被认成我们的、
+    #    又被当成"外来 Mod"拦住后续安装。
+    ini = target_dir / INI_NAME
+    if ini.is_file():
+        try:
+            if is_our_ini(ini.read_text("utf-8", "ignore")):
+                found[INI_NAME] = try_hash(ini)
+        except OSError:
+            pass
 
     return found
 
@@ -975,8 +977,22 @@ def uninstall(target_dir: str | Path, record: dict, force: bool = False) -> Opti
             res.message += f"{rel} 无法读取（可能被占用），未能删除；"
             continue
         if exp and digest != exp and not force and rel not in originals:
-            res.message += f"{rel} 已被改动，为安全起见未删除；"
-            continue
+            # 例外：生成的 OptiScaler.ini 每次运行都会被引擎回写（它会把当前
+            # 生效值落盘），哈希必然变。只要署名还在，就还是我们那份，
+            # 该删 —— 否则卸载会永远卡在这里删不掉。
+            if rel == INI_NAME:
+                try:
+                    if is_our_ini(p.read_text("utf-8", "ignore")):
+                        pass
+                    else:
+                        res.message += f"{rel} 已被改动且不像本工具生成，未删除；"
+                        continue
+                except OSError:
+                    res.message += f"{rel} 无法读取，未删除；"
+                    continue
+            else:
+                res.message += f"{rel} 已被改动，为安全起见未删除；"
+                continue
         try:
             p.unlink()
             res.removed.append(rel)
@@ -1345,6 +1361,29 @@ def preflight(
     else:
         out.append(Check("ok", f"倍率 {mult}X", multiplier_label(mult)))
 
+    # 9) 游戏配置（虚幻引擎）：必须关掉 dilated motion vectors
+    from . import ueconfig
+
+    path, how = ueconfig.find_engine_ini(target_dir)
+    if path is None:
+        out.append(Check(
+            "warn", "没找到游戏的 Engine.ini",
+            how + "\n\n"
+            "虚幻引擎游戏需要在这里关闭 dilated motion vectors，否则 XeFG 会每帧失败"
+            "（表现为菜单显示 4X 但帧数没变）。\n"
+            "非虚幻引擎游戏可以忽略这条。",
+        ))
+    elif path.is_file() and ueconfig.has_cvar(ueconfig.read_text(path)):
+        out.append(Check("ok", "游戏配置已就绪", f"dilated motion vectors 已关闭（{path}）"))
+    else:
+        out.append(Check(
+            "ok", "将修改游戏配置（可完整还原）",
+            f"{how}\n"
+            f"会加入一行 {ueconfig.CVAR_KEY}={ueconfig.CVAR_VALUE}（[SystemSettings] 节），"
+            "这是 XeFG 正常工作的前提。\n"
+            "卸载时会精确撤销这一行，要么删掉要么改回原值，逐字节还原。",
+        ))
+
     if bundle == "optiscaler-dlss5":
         out.append(Check(
             "warn", "DLSS 5 神经网络渲染是实验性的",
@@ -1390,8 +1429,21 @@ def install(
     if dry_run:
         return OptiResult(True, f"预演完成，未做任何改动（将写入 {len(plan.writes)} 项）")
 
+    # 前置：改游戏自己的 Engine.ini。
+    # UE 游戏必须关掉 dilated motion vectors，否则 XeFG 每帧都失败
+    # （表现为"菜单显示 4X 但帧数没变"）。这一步动的是游戏配置，所以
+    # 主安装失败时要一并回退。
+    from . import ueconfig
+
+    ue = ueconfig.ensure_dilate_off(target_dir)
+    ue_edit = ue.edit.to_dict() if ue.edit else None
+
     res = execute_plan(plan, originals=originals)
     if not res.success:
+        # 主安装失败 -> 把 Engine.ini 也退回原样，不留半套改动
+        if ue.ok and ue.changed:
+            ueconfig.restore_dilate(target_dir, ue.edit, created=ue.created)
+            res.message += "（已回退对游戏配置的改动）"
         return res
 
     # 记录状态。originals 用执行结果里那份 —— 它包含了本轮新备份的原始文件，
@@ -1412,7 +1464,18 @@ def install(
         "originals": dict(res.originals),
         "backup_dir": str(res.backup_dir) if res.backup_dir else "",
         "installed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        # 游戏配置的改动也一并记账，卸载才知道要撤什么
+        "ue_config": {
+            "path": str(ue.path) if ue.path else "",
+            "changed": bool(ue.ok and ue.changed),
+            "created": bool(ue.created),
+            "edit": ue_edit,
+        },
     })
+    if ue.ok and ue.changed:
+        res.message += f"；并已关闭游戏的 dilated motion vectors（{ue.path}）"
+    elif not ue.ok:
+        res.message += f"；但游戏配置未能修改：{ue.detail}"
     return res
 
 
@@ -1437,6 +1500,15 @@ def uninstall_installed(target_dir: str | Path, force: bool = False) -> OptiResu
 
     res = uninstall(target_dir, rec, force=force)
     if res.success:
+        # 撤销对游戏 Engine.ini 的改动
+        ue = rec.get("ue_config") or {}
+        if ue.get("changed"):
+            from . import ueconfig
+
+            edit = ueconfig.CvarEdit.from_dict(ue.get("edit"))
+            r = ueconfig.restore_dilate(target_dir, edit, created=bool(ue.get("created")))
+            res.message += f"；{r.detail}" if r.ok else f"；游戏配置回退失败：{r.detail}"
+
         gone = clean_runtime_leftovers(target_dir)
         if gone:
             res.message += f"，并清理运行产物 {len(gone)} 项"
