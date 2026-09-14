@@ -63,6 +63,29 @@ def _make_fake_game(root: Path, exe_name: str = "FakeGame-Win64-Shipping.exe", f
     return exe_dir
 
 
+def _section_has(ini_text: str, section: str, key: str, value: str) -> bool:
+    """检查 ini 的**指定节**里某个键是否等于某值。
+
+    不能全局搜 "Key=value" —— OptiScaler 的配置里 Enabled / InterpolationCount
+    这类键在十几个节里都出现，全局匹配会把"改错了地方"判成通过。
+    这正是定点修改最容易出的错，所以判据必须跟着严起来。
+    """
+    cur = ""
+    for line in ini_text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            cur = s[1:-1].strip()
+            continue
+        if cur.lower() != section.lower():
+            continue
+        if s.startswith(";") or "=" not in s:
+            continue
+        k, _, v = s.partition("=")
+        if k.strip().lower() == key.lower() and v.strip() == value:
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------
 # 合成 PE —— 自检**不能**依赖任何系统文件
 #
@@ -1020,6 +1043,282 @@ def run(verbose: bool = True) -> Runner:
             ),
             str(installer.backups_root()),
         )
+
+        # ------------------------------------------------------------------
+        # 19. OptiScaler 引擎（XeSS 帧生成 / DLSS 5）
+        # ------------------------------------------------------------------
+        from . import optiscaler as oi
+        from . import state as st
+
+        # 19a. 引擎包完整性
+        for key in oi.bundle_keys():
+            ok, msg = oi.bundle_available(key)
+            r.check(f"OptiScaler：引擎包 {key} 齐全", ok, msg)
+        r.check("OptiScaler：默认引擎包是 xess",
+                oi.default_bundle() == "optiscaler-xess", oi.default_bundle())
+        r.check("OptiScaler：候选入口含 dxgi.dll",
+                "dxgi.dll" in oi.PROXY_CANDIDATES)
+
+        # 19b. INI 定点修改必须落在正确的节里。
+        #      这是最容易写错的地方 —— Enabled / InterpolationCount 这类键
+        #      在模板里出现在十几个不同的节，全局替换一定会改错。
+        ini_txt = oi.build_ini("optiscaler-xess", 4)
+        r.check("OptiScaler INI：带本工具署名（可被 is_our_ini 认出）",
+                oi.is_our_ini(ini_txt))
+        r.check("OptiScaler INI：FrameGen.Enabled=true",
+                _section_has(ini_txt, "FrameGen", "Enabled", "true"), "")
+        r.check("OptiScaler INI：FrameGen.FGInput=upscaler",
+                _section_has(ini_txt, "FrameGen", "FGInput", "upscaler"), "")
+        r.check("OptiScaler INI：FrameGen.FGOutput=xefg",
+                _section_has(ini_txt, "FrameGen", "FGOutput", "xefg"), "")
+        r.check("OptiScaler INI：XeFG.InterpolationCount=3（4X）",
+                _section_has(ini_txt, "XeFG", "InterpolationCount", "3"), "")
+        r.check("OptiScaler INI：XeFG.UnlockMFG=true（4X 需要解锁）",
+                _section_has(ini_txt, "XeFG", "UnlockMFG", "true"), "")
+        r.check("OptiScaler INI：XeFG.MaxInterpolatedFrames=3",
+                _section_has(ini_txt, "XeFG", "MaxInterpolatedFrames", "3"), "")
+        r.check("OptiScaler INI：倍率可回读", oi.read_multiplier(ini_txt) == 4,
+                str(oi.read_multiplier(ini_txt)))
+        r.check("OptiScaler INI：摘要里有引擎包名",
+                "bundle" in oi.read_engine_summary(ini_txt))
+
+        # 2X 不该触发解锁
+        ini2 = oi.build_ini("optiscaler-xess", 2)
+        r.check("OptiScaler INI：2X 时 UnlockMFG=false",
+                _section_has(ini2, "XeFG", "UnlockMFG", "false"), "")
+        r.check("OptiScaler INI：2X 时 InterpolationCount=1",
+                _section_has(ini2, "XeFG", "InterpolationCount", "1"), "")
+
+        # DLSS 5 包要显式打开 DlssNr
+        ini5 = oi.build_ini("optiscaler-dlss5", 4)
+        r.check("OptiScaler INI：DLSS 5 包打开 DlssNr.Enabled",
+                _section_has(ini5, "DlssNr", "Enabled", "true"), "")
+
+        # 19b-2. HighResMV / 日志开关
+        #   黑神话实测：不设 HighResMV 时 XeFG 每帧都因
+        #   "motion vector and depth resource resolutions must match" 失败，
+        #   帧生成完全不生效。所以默认必须是 true。
+        r.check("OptiScaler INI：默认 HighResMV=true（黑神话必需）",
+                _section_has(ini_txt, "XeFG", "HighResMV", "true"), "")
+        r.check("OptiScaler INI：可显式关掉 HighResMV",
+                _section_has(oi.build_ini("optiscaler-xess", 4, high_res_mv=False),
+                             "XeFG", "HighResMV", "false"), "")
+        r.check("OptiScaler INI：high_res_mv=None 时不覆盖上游默认",
+                "HighResMV=true" not in oi.build_ini("optiscaler-xess", 4, high_res_mv=None)
+                and "HighResMV=false" not in oi.build_ini("optiscaler-xess", 4, high_res_mv=None),
+                "")
+        r.check("OptiScaler INI：默认打开日志（便于排查「没效果」）",
+                _section_has(ini_txt, "Log", "LogToFile", "true"), "")
+        r.check("OptiScaler INI：log_level=None 时不打开日志",
+                _section_has(oi.build_ini("optiscaler-xess", 4, log_level=None),
+                             "Log", "LogToFile", "false"), "")
+
+        # 倍率归一化
+        r.eq("OptiScaler：倍率 99 归一化到 6", oi.normalize_multiplier(99), 6)
+        r.eq("OptiScaler：倍率 0 归一化到 2", oi.normalize_multiplier(0), 2)
+        r.eq("OptiScaler：倍率 4 保持不变", oi.normalize_multiplier(4), 4)
+
+        # 19c. 安装 → 体检 → 卸载，目录必须回到原样
+        gOpti = tmp / "OptiGame"
+        edOpti = _make_fake_game(gOpti, foreign=False)
+        # 预置一个游戏自己的 dxgi.dll：入口应被让开，且它不能被改动
+        game_dxgi = b"GAME OWN DXGI - DO NOT TOUCH"
+        (edOpti / "dxgi.dll").write_bytes(game_dxgi)
+        before_opti = {p.relative_to(edOpti).as_posix() for p in edOpti.rglob("*") if p.is_file()}
+
+        oplan = oi.make_plan(edOpti, edOpti / "FakeGame-Win64-Shipping.exe",
+                             "optiscaler-xess", 4, game_name="OptiGame")
+        r.check("OptiScaler：被占用的 dxgi.dll 会让开（改用别的入口）",
+                oplan.proxy != "dxgi.dll", oplan.proxy)
+        ores = oi.execute_plan(oplan)
+        r.check("OptiScaler：安装成功", ores.success, ores.message)
+        r.check("OptiScaler：游戏自己的 dxgi.dll 未被改动",
+                (edOpti / "dxgi.dll").read_bytes() == game_dxgi)
+        r.check("OptiScaler：INI 已落盘", (edOpti / oi.INI_NAME).is_file())
+        r.check("OptiScaler：子目录文件已落盘",
+                (edOpti / "D3D12_Optiscaler" / "D3D12Core.dll").is_file())
+        r.check("OptiScaler：许可文件收在 D3D12_Optiscaler\\Licenses 下",
+                (edOpti / "D3D12_Optiscaler" / "Licenses" / "XeSS_LICENSE.txt").is_file())
+
+        # 按内容识别
+        mine = oi.detect_ours(edOpti)
+        r.check("OptiScaler：detect_ours 能认出自己的文件",
+                oplan.proxy in mine and oi.INI_NAME in mine,
+                f"{len(mine)} 个")
+
+        # 幂等：再装一次应全部跳过，且不产生第二个代理
+        oplan2 = oi.make_plan(edOpti, edOpti / "FakeGame-Win64-Shipping.exe",
+                              "optiscaler-xess", 4, game_name="OptiGame",
+                              prev_proxy=oplan.proxy)
+        r.check("OptiScaler：重装沿用同一入口",
+                oplan2.proxy == oplan.proxy, f"{oplan2.proxy} != {oplan.proxy}")
+        r.check("OptiScaler：重装无孤儿需要清理", not oplan2.cleanup, str(oplan2.cleanup))
+        r.check("OptiScaler：重装全部跳过（幂等）",
+                all(i.action == "skip" for i in oplan2.items),
+                str([(i.action, i.rel) for i in oplan2.items if i.action != "skip"][:3]))
+
+        # 卸载：目录必须回到安装前
+        urec = {
+            "engine": st.ENGINE_OPTISCALER,
+            "files": [{"name": i.rel, "sha256": oi.try_hash(edOpti / i.rel)}
+                      for i in oplan.items if i.action in ("copy", "skip")],
+            "originals": {},
+            "proxy": oplan.proxy,
+            "exe": str(edOpti / "FakeGame-Win64-Shipping.exe"),
+        }
+        ures = oi.uninstall(edOpti, urec)
+        r.check("OptiScaler：卸载成功", ures.success, ures.message)
+        after_opti = {p.relative_to(edOpti).as_posix() for p in edOpti.rglob("*") if p.is_file()}
+        r.check("OptiScaler：卸载后目录与安装前完全一致",
+                after_opti == before_opti,
+                f"多出 {sorted(after_opti - before_opti)}；少了 {sorted(before_opti - after_opti)}")
+        r.check("OptiScaler：卸载后自己建的空目录被清掉",
+                not (edOpti / "D3D12_Optiscaler").exists())
+
+        # 19d. 覆盖游戏原有文件 → 卸载必须还原
+        gOwn = tmp / "OwnGame"
+        edOwn = _make_fake_game(gOwn, foreign=False)
+        originals_own = {}
+        for nm in oi.PROXY_CANDIDATES:
+            data = f"GAME OWNED {nm}".encode()
+            (edOwn / nm).write_bytes(data)
+            originals_own[nm] = data
+        plan_own = oi.make_plan(edOwn, edOwn / "FakeGame-Win64-Shipping.exe",
+                                "optiscaler-xess", 4)
+        res_own = oi.execute_plan(plan_own)
+        r.check("OptiScaler：全部入口被占用时仍能安装（备份后覆盖）",
+                res_own.success, res_own.message)
+        r.check("OptiScaler：执行结果回传了原始文件映射",
+                bool(res_own.originals), str(list(res_own.originals.keys())))
+        urec2 = {
+            "engine": st.ENGINE_OPTISCALER,
+            "files": [{"name": i.rel, "sha256": ""} for i in plan_own.items
+                      if i.action in ("copy", "skip")],
+            "originals": dict(res_own.originals),
+            "proxy": plan_own.proxy,
+            "exe": str(edOwn / "FakeGame-Win64-Shipping.exe"),
+        }
+        ures2 = oi.uninstall(edOwn, urec2)
+        r.check("OptiScaler：卸载成功（覆盖场景）", ures2.success, ures2.message)
+        r.check("OptiScaler：被覆盖的游戏原文件全部还原",
+                all((edOwn / nm).read_bytes() == originals_own[nm]
+                    for nm in oi.PROXY_CANDIDATES),
+                str(list(ures2.restored)))
+
+        # 19e. 引擎互斥：两个方向都要拦住
+        gMx = tmp / "MutexGame"
+        _make_fake_game(gMx, foreign=False)
+        st.record_install({
+            "engine": st.ENGINE_DLSSG, "target_dir": str(gMx.resolve()),
+            "proxy": "version.dll", "files": [], "originals": {},
+        })
+        mx_checks = oi.preflight(gMx, "optiscaler-xess", 4, running_names=[])
+        r.check("互斥：DLSSG 已装时 OptiScaler 被拦",
+                any(c.level == "error" and "另一个引擎" in c.title for c in mx_checks),
+                str([c.title for c in mx_checks if c.level == "error"]))
+        st.forget_install(gMx)
+        # 反方向：记录里写的是 OptiScaler，DLSSG 预检必须拦住
+        st.record_install({
+            "engine": st.ENGINE_OPTISCALER, "target_dir": str(gMx.resolve()),
+            "proxy": "dxgi.dll", "files": [], "originals": {},
+        })
+        pf_mx = installer.preflight(gMx, None, "version.dll", "SM86")
+        r.check("互斥：OptiScaler 已装时 DLSSG 被拦",
+                any("另一个引擎" in c.title for c in pf_mx.errors),
+                str([c.title for c in pf_mx.errors]))
+        # 清理这条记录，别影响后面的用例
+        st.forget_install(gMx)
+
+        # 19e-2. 记录丢了、文件还在时，互斥保护不能失效
+        #        （状态文件被清理是真实会发生的；此时若只查记录就会静默放行）
+        gOrphan = tmp / "OrphanGame"
+        edOrphan = _make_fake_game(gOrphan, foreign=False)
+        st.forget_install(edOrphan)
+        plan_orphan = oi.make_plan(edOrphan, edOrphan / "FakeGame-Win64-Shipping.exe",
+                                   "optiscaler-xess", 4)
+        oi.execute_plan(plan_orphan)
+        st.forget_install(edOrphan)          # 抹掉记录，模拟状态丢失
+        pf_orphan = installer.preflight(edOrphan, None, "version.dll", "SM86")
+        r.check("互斥：记录丢失后仍按内容拦住 DLSSG",
+                any("另一个引擎" in c.title for c in pf_orphan.errors),
+                str([c.title for c in pf_orphan.errors]))
+        r.check("互斥：无记录时 engine_present 仍认出 OptiScaler",
+                installer.engine_present(edOrphan) == st.ENGINE_OPTISCALER)
+
+        # 19f. 状态查表必须归一化路径（否则互斥会静默失效）
+        gKey = tmp / "KeyGame"
+        _make_fake_game(gKey, foreign=False)
+        st.record_install({
+            "engine": st.ENGINE_OPTISCALER, "target_dir": str(gKey.resolve()),
+            "proxy": "dxgi.dll", "files": [], "originals": {},
+        })
+        r.check("状态：相对路径也能查到记录（路径归一化）",
+                st.find_install(gKey) is not None,
+                f"key={st.path_key(gKey)}")
+        r.check("状态：engine_of 读得出引擎",
+                st.engine_of(st.find_install(gKey)) == st.ENGINE_OPTISCALER)
+        st.forget_install(gKey)
+        r.check("状态：forget_install 也能按相对路径清掉",
+                st.find_install(gKey) is None)
+
+        # 19g. 外来 Mod 识别：不能把我们自己装的东西当成"别人的"
+        gForeign = tmp / "ForeignGame"
+        edForeign = _make_fake_game(gForeign, foreign=False)
+        r.check("外来识别：干净目录无命中",
+                installer.foreign_mods(edForeign) == [],
+                str(installer.foreign_mods(edForeign)))
+        # 放一份**别人打包的** OptiScaler 代理进去：PE 里 OriginalFilename 仍是
+        # OptiScaler.dll，但内容与本工具内置的那份不同 —— 判据必须覆盖这种情况。
+        # （直接用我们自己的 payload 文件是不行的：内容一致就会被正确地认成"我们的"）
+        src_proxy = oi.payload_root("optiscaler-xess") / "dxgi.dll"
+        if src_proxy.is_file():
+            foreign_bytes = src_proxy.read_bytes() + b"\x00" * 64
+            (edForeign / "dxgi.dll").write_bytes(foreign_bytes)
+            hits = installer.foreign_mods(edForeign)
+            r.check("外来识别：按 PE 原始名认出改名的 OptiScaler",
+                    any("OptiScaler" in h for h in hits), str(hits))
+            pf_f = installer.preflight(edForeign, None, "version.dll", "SM86")
+            r.check("外来识别：检出外来 Mod 时 DLSSG 预检报错",
+                    any("别的帧生成 Mod" in c.title for c in pf_f.errors),
+                    str([c.title for c in pf_f.errors]))
+
+        # 反过来：我们**自己**装的文件绝不能被当成外来 Mod
+        gMine = tmp / "MineGame"
+        edMine = _make_fake_game(gMine, foreign=False)
+        st.forget_install(edMine)
+        plan_mine = oi.make_plan(edMine, edMine / "FakeGame-Win64-Shipping.exe",
+                                 "optiscaler-xess", 4)
+        oi.execute_plan(plan_mine)
+        r.check("外来识别：自己装的文件不被误报",
+                installer.foreign_mods(edMine) == [],
+                str(installer.foreign_mods(edMine)))
+        r.check("外来识别：detect_ours 认得自己装的入口",
+                plan_mine.proxy in oi.detect_ours(edMine))
+
+        # 19h. 编排层：install / verify_installed / uninstall_installed
+        gOrch = tmp / "OrchGame"
+        edOrch = _make_fake_game(gOrch, foreign=False)
+        st.forget_install(edOrch)
+        orch = oi.install(edOrch, edOrch / "FakeGame-Win64-Shipping.exe",
+                          "optiscaler-xess", 3, game_name="OrchGame")
+        r.check("编排：install 成功", orch.success, orch.message)
+        rec_orch = st.find_install(edOrch)
+        r.check("编排：记录了引擎标识",
+                rec_orch is not None and st.engine_of(rec_orch) == st.ENGINE_OPTISCALER)
+        r.check("编排：记录了倍率", (rec_orch or {}).get("multiplier") == 3,
+                str((rec_orch or {}).get("multiplier")))
+        vr_orch = installer.verify_any(edOrch)
+        r.check("编排：verify_any 走 OptiScaler 分支且健康",
+                vr_orch.installed and vr_orch.healthy,
+                str([(c.level, c.title) for c in vr_orch.details if c.level != "ok"][:3]))
+        r.check("编排：engine_present 认出 OptiScaler",
+                installer.engine_present(edOrch) == st.ENGINE_OPTISCALER)
+        ur_orch = installer.uninstall_any(edOrch)
+        r.check("编排：uninstall_any 成功", ur_orch.success, ur_orch.message)
+        r.check("编排：卸载后记录已清除", st.find_install(edOrch) is None)
+        left_orch = {p.relative_to(edOrch).as_posix() for p in edOrch.rglob("*") if p.is_file()}
+        r.check("编排：卸载后无残留", left_orch == {"FakeGame-Win64-Shipping.exe"},
+                str(sorted(left_orch)))
 
     finally:
         # 恢复用户真实状态

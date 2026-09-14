@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import APP_NAME, UPSTREAM_REPO, UPSTREAM_VERSION, VERSION
 from . import anticheat as ac
-from . import games, gpu, installer, winenv
+from . import games, gpu, installer, optiscaler, state, winenv
 from . import capability
 from . import profiles
 from .gpu import VERDICT_NOT_NEEDED, VERDICT_OK
@@ -89,11 +89,20 @@ class App(tk.Tk):
         self.exe_var = tk.StringVar(value="")
         self.router_var = tk.StringVar(value="自动（按显卡判断）")
 
+        # 引擎选择：两个引擎族互斥，同一个游戏目录只能装一个
+        self._engine_map: dict[str, tuple[str, str]] = {
+            "DLSSG（NVIDIA DLSS 帧生成）": (state.ENGINE_DLSSG, ""),
+            "OptiScaler · XeSS 多帧生成": (state.ENGINE_OPTISCALER, "optiscaler-xess"),
+            "OptiScaler · DLSS 5 神经网络渲染 + XeSS": (state.ENGINE_OPTISCALER, "optiscaler-dlss5"),
+        }
+        self.engine_var = tk.StringVar(value="DLSSG（NVIDIA DLSS 帧生成）")
+
         self._build()
         self.after(80, self._pump)
         self._log(f"{APP_NAME} v{VERSION} 已启动")
         self._log(f"上游 Mod：DLSSG Native {UPSTREAM_VERSION} — {UPSTREAM_REPO}")
-        self._log("本工具只在游戏目录里写入 2 个文件，且写入前一律先备份、写入后校验哈希。")
+        self._log("本工具只在游戏目录里写入自己的文件，且写入前一律先备份、写入后校验哈希。")
+        self._sync_engine_widgets()
         self.refresh_env()
 
     # ------------------------------------------------------------------
@@ -223,51 +232,75 @@ class App(tk.Tk):
         for col in (1, 3):
             opt.columnconfigure(col, weight=1)
 
-        ttk.Label(opt, text="计算路由：", font=FONT).grid(row=0, column=0, sticky="w")
+        # 引擎选择放在最上面 —— 它决定了下面所有选项的含义
+        ttk.Label(opt, text="帧生成引擎：", font=FONT).grid(row=0, column=0, sticky="w")
+        self.engine_combo = ttk.Combobox(
+            opt, textvariable=self.engine_var, font=FONT, state="readonly",
+            values=list(self._engine_map.keys()),
+        )
+        self.engine_combo.grid(row=0, column=1, columnspan=3, sticky="ew")
+        self.engine_combo.bind("<<ComboboxSelected>>", self._on_engine_change)
+
+        self.engine_hint = ttk.Label(opt, text="", font=FONT, foreground=C_DIM)
+        self.engine_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        # 运动矢量分辨率：OptiScaler 引擎专有。默认开着 —— 实测黑神话这类 UE5
+        # 游戏不设它的话，XeFG 每帧都因 MV/深度分辨率不匹配而失败（表现为"没效果"）。
+        self.hiresmv_var = tk.BooleanVar(value=True)
+        self.hiresmv_check = ttk.Checkbutton(
+            opt, text="运动矢量按高分辨率处理（HighResMV，XeSS 引擎专用，黑神话等 UE5 游戏必须开）",
+            variable=self.hiresmv_var,
+        )
+        self.hiresmv_check.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        ttk.Label(opt, text="计算路由：", font=FONT).grid(row=3, column=0, sticky="w", pady=(6, 0))
         self.router_combo = ttk.Combobox(
             opt, textvariable=self.router_var, font=FONT, state="readonly",
             values=["自动（按显卡判断）", "SM86（RTX 30 系列）", "SM75（RTX 20 系列，实验性）"],
         )
-        self.router_combo.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        self.router_combo.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
         self.router_combo.bind("<<ComboboxSelected>>", self._on_router_change)
 
-        ttk.Label(opt, text="代理入口：", font=FONT).grid(row=0, column=2, sticky="w")
+        ttk.Label(opt, text="代理入口：", font=FONT).grid(row=3, column=2, sticky="w", pady=(6, 0))
         self.proxy_combo = ttk.Combobox(
             opt, textvariable=self.proxy_var, font=FONT, state="readonly",
             values=["自动选择"] + list(profiles.PROFILE_024.proxy_names),
         )
-        self.proxy_combo.grid(row=0, column=3, sticky="ew")
+        self.proxy_combo.grid(row=3, column=3, sticky="ew", pady=(6, 0))
 
         # 倍率上限：这是评论区明确要求加的功能（0.3.0 最高 6X）
-        ttk.Label(opt, text="最高倍率：", font=FONT).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(opt, text="最高倍率：", font=FONT).grid(row=4, column=0, sticky="w", pady=(6, 0))
         self.frames_combo = ttk.Combobox(
             opt, textvariable=self.frames_var, font=FONT, state="readonly",
             values=list(installer.FRAME_OPTIONS),
         )
-        self.frames_combo.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+        self.frames_combo.grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+        # 倍率一变，下面的说明（尤其是"实验性档位"警告）要跟着变
+        self.frames_combo.bind("<<ComboboxSelected>>", self._on_frames_change)
 
-        ttk.Label(opt, text="采样档：", font=FONT).grid(row=1, column=2, sticky="w", pady=(6, 0))
-        ttk.Combobox(
+        ttk.Label(opt, text="采样档：", font=FONT).grid(row=4, column=2, sticky="w", pady=(6, 0))
+        self.sample_combo = ttk.Combobox(
             opt, textvariable=self.sample_var, font=FONT, state="readonly",
             values=["精确档（推荐，HardwareBilinear=0）", "性能档（近似采样，HardwareBilinear=1，仅 SM86）"],
-        ).grid(row=1, column=3, sticky="ew", pady=(6, 0))
+        )
+        self.sample_combo.grid(row=4, column=3, sticky="ew", pady=(6, 0))
 
-        ttk.Label(opt, text="扫描档位：", font=FONT).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(opt, text="扫描档位：", font=FONT).grid(row=5, column=0, sticky="w", pady=(6, 0))
         self.preset_combo = ttk.Combobox(
             opt, textvariable=self.preset_var, font=FONT, state="readonly",
             values=list(games.SCAN_PRESETS.keys()),
         )
-        self.preset_combo.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+        self.preset_combo.grid(row=5, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
         self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
 
-        ttk.Label(opt, text="日志级别：", font=FONT).grid(row=2, column=2, sticky="w", pady=(6, 0))
+        ttk.Label(opt, text="日志级别：", font=FONT).grid(row=4, column=2, sticky="w", pady=(6, 0))
         ttk.Combobox(
             opt, textvariable=self.loglv_var, font=FONT, state="readonly",
             values=["仅记录错误（Level=1）", "关闭日志（Level=0）", "运行诊断（Level=2）", "详细日志（Level=3）"],
-        ).grid(row=2, column=3, sticky="ew", pady=(6, 0))
+        ).grid(row=4, column=3, sticky="ew", pady=(6, 0))
 
         self.frames_hint = ttk.Label(opt, text="", font=FONT, foreground=C_DIM)
-        self.frames_hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.frames_hint.grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         # ---------------- 操作按钮 ----------------
         act = ttk.Frame(root)
@@ -496,6 +529,87 @@ class App(tk.Tk):
         """路由变了 → 可用的代理入口和倍率也跟着变（0.2.4 和 0.3.0 不一样）。"""
         self._sync_profile_widgets()
 
+    def _on_engine_change(self, _evt=None) -> None:
+        self._sync_engine_widgets()
+        self._render_detail()
+
+    def _on_frames_change(self, _evt=None) -> None:
+        """倍率变了 → 刷新说明文字。"""
+        self._sync_profile_widgets()
+
+    def _current_engine(self) -> tuple[str, str]:
+        """返回 (引擎, 引擎包 key)。"""
+        return self._engine_map.get(self.engine_var.get(), (state.ENGINE_DLSSG, ""))
+
+    def _sync_engine_widgets(self) -> None:
+        """按当前引擎把「率」「路由」等控件切到对应的语义。
+
+        DLSSG 的倍率是 MaxGeneratedFrames（上限，游戏说了算）；
+        OptiScaler 的倍率是我们直接下发给 XeFG 的插值帧数（我们说了算）。
+        两者含义不同，所以选项列表必须分开，不能共用一套。
+        """
+        engine, bundle = self._current_engine()
+        is_opti = engine == state.ENGINE_OPTISCALER
+
+        # 倍率控件：两个引擎共用这一个下拉框，但取值完全不同
+        try:
+            if is_opti:
+                opts = [f"{m}X  {lbl.split('（')[1][:-1] if '（' in lbl else ''}".strip()
+                        for m, lbl in optiscaler.multiplier_options()]
+                # 用简单稳定的文本，便于反查
+                opts = [f"{m}X" for m, _l in optiscaler.multiplier_options()]
+                self.frames_combo.configure(values=opts)
+                if self.frames_var.get() not in opts:
+                    self.frames_var.set("4X" if "4X" in opts else opts[0])
+            else:
+                prof = profiles.for_router(self._current_router())
+                opts = installer.frame_options_for(prof)
+                self.frames_combo.configure(values=opts)
+                if self.frames_var.get() not in opts:
+                    self.frames_var.set(opts[0])
+        except tk.TclError:
+            pass
+
+        # OptiScaler 不区分计算路由 / 采样档 —— 那两个是 DLSSG payload 的概念
+        for w in (self.router_combo, self.proxy_combo, self.sample_combo):
+            try:
+                w.configure(state="disabled" if is_opti else "readonly")
+            except tk.TclError:
+                pass
+        # HighResMV 是 OptiScaler 专有开关，DLSSG 引擎下无意义
+        try:
+            self.hiresmv_check.configure(state="normal" if is_opti else "disabled")
+        except tk.TclError:
+            pass
+
+        # 引擎说明
+        if is_opti:
+            spec = optiscaler.get_bundle(bundle)
+            ok, msg = optiscaler.bundle_available(bundle)
+            if spec is None:
+                self.engine_hint.configure(text="该引擎包不可用", foreground=C_ERR)
+            elif not ok:
+                self.engine_hint.configure(text=f"引擎包不完整：{msg}", foreground=C_ERR)
+            elif bundle == "optiscaler-dlss5":
+                self.engine_hint.configure(
+                    text="DLSS 5 神经网络渲染 + XeSS 多帧生成。实验性：所用 nvngx_dlssnr.dll "
+                         "未签名、且不在你的驱动里。倍率由本工具直接设定。",
+                    foreground=C_WARN,
+                )
+            else:
+                self.engine_hint.configure(
+                    text=f"{spec.display_name}。倍率由本工具直接下发给 XeSS 帧生成，"
+                         "不再依赖游戏提供的选项。",
+                    foreground=C_DIM,
+                )
+        else:
+            self.engine_hint.configure(
+                text="DLSSG（NVIDIA DLSS 帧生成）：本工具的原有引擎，按显卡路由选上游版本。",
+                foreground=C_DIM,
+            )
+
+        self._sync_profile_widgets()
+
     def _current_router(self) -> str:
         rsel = self.router_var.get()
         if rsel.startswith("自动"):
@@ -503,7 +617,30 @@ class App(tk.Tk):
         return "SM75" if "SM75" in rsel else "SM86"
 
     def _sync_profile_widgets(self) -> None:
-        """按当前路由把「代理入口」「最高倍率」的选项刷成对应 profile 的。"""
+        """按当前路由（DLSSG）或当前引擎包（OptiScaler）刷新说明与可选项。"""
+        engine, bundle = self._current_engine()
+
+        if engine == state.ENGINE_OPTISCALER:
+            mult = self._current_multiplier()
+            lines = [
+                f"将以 {mult}X 安装。倍率是我们直接下发给 XeSS 帧生成的，",
+                "不再受游戏有没有开放倍率选项限制 —— 这是它和 DLSSG 引擎最大的区别。",
+            ]
+            if mult > optiscaler.TEMPLATE_MAX_MULT:
+                lines.append(
+                    f"⚠ {mult}X 超出该构建自带模板写明的档位（最高 "
+                    f"{optiscaler.TEMPLATE_MAX_MULT}X），靠运行时补丁解锁，可能无效或画质异常。"
+                )
+            lines.append("注意：本引擎与 DLSSG 引擎互斥，同一游戏目录只能装一个。")
+            try:
+                self.frames_hint.configure(
+                    text="\n".join(lines),
+                    foreground=C_WARN if mult > optiscaler.TEMPLATE_MAX_MULT else C_DIM,
+                )
+            except tk.TclError:
+                pass
+            return
+
         router = self._current_router()
         prof = profiles.for_router(router)
 
@@ -533,13 +670,22 @@ class App(tk.Tk):
         )
         if router == "SM75":
             hint += "\n⚠ 20 系为实验性支持：上游 0.3.0 已移除 SM75 内核，本工具自动改用 0.2.4。"
-        # 说明文字：讲清「上限」的含义 + 当前用哪个 profile
+        hint += "\n注意：本引擎与 OptiScaler（XeSS）引擎互斥，同一游戏目录只能装一个。"
         try:
             self.frames_hint.configure(
                 text=hint, foreground=C_WARN if router == "SM75" else C_DIM
             )
         except tk.TclError:
             pass
+
+    def _current_multiplier(self) -> int:
+        """从倍率下拉框反查数字。"""
+        raw = (self.frames_var.get() or "").strip()
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        try:
+            return optiscaler.normalize_multiplier(int(digits))
+        except ValueError:
+            return 4
 
     def _on_preset_change(self, _evt=None) -> None:
         """切换扫描档位后重扫当前游戏。"""
@@ -730,15 +876,17 @@ class App(tk.Tk):
             self.detail.insert("end", "\n✓ 未检测到反作弊组件\n", "ok")
 
         target_dir = Path(self.chosen_exe).parent if self.chosen_exe else None
-        vr = installer.verify(target_dir) if target_dir else None
+        vr = installer.verify_any(target_dir) if target_dir else None
         if vr and vr.installed:
             rec = vr.record or {}
+            which = installer.engine_of(rec)
             if vr.healthy:
-                self.detail.insert(
-                    "end",
-                    f"\n✓ 已安装（Router={rec.get('router') or '—'}，入口 {rec.get('proxy') or '—'}）\n",
-                    "ok",
-                )
+                if which == state.ENGINE_OPTISCALER:
+                    detail = (f"引擎 {installer.engine_label(which)}，"
+                              f"倍率 {rec.get('multiplier', '—')}X，入口 {rec.get('proxy') or '—'}")
+                else:
+                    detail = f"Router={rec.get('router') or '—'}，入口 {rec.get('proxy') or '—'}"
+                self.detail.insert("end", f"\n✓ 已安装（{detail}）\n", "ok")
             else:
                 self.detail.insert("end", "\n⚠ 已安装但文件异常，建议卸载后重装\n", "warn")
             for c in vr.details:
@@ -764,8 +912,11 @@ class App(tk.Tk):
     def _refresh_installed_label(self) -> None:
         inst = installer.all_installs()
         if inst:
+            n_opti = sum(1 for i in inst if installer.engine_of(i) == state.ENGINE_OPTISCALER)
+            extra = f"（其中 {n_opti} 个是 XeSS 引擎）" if n_opti else ""
             self.installed_label.configure(
-                text=f"本工具已为 {len(inst)} 个游戏装过（可随时卸载还原）", foreground=C_OK
+                text=f"本工具已为 {len(inst)} 个游戏装过{extra}（可随时卸载还原）",
+                foreground=C_OK,
             )
         else:
             self.installed_label.configure(text="尚未安装过任何游戏", foreground=C_DIM)
@@ -834,10 +985,159 @@ class App(tk.Tk):
         return pf
 
     # ------------------------------------------------------------------
+    # OptiScaler 引擎（XeSS / DLSS 5）
+    # ------------------------------------------------------------------
+
+    def _opti_target(self) -> Path | None:
+        if self.selected is None:
+            messagebox.showinfo("请先选游戏", "请在左边列表里选一个游戏。")
+            return None
+        if not self.chosen_exe:
+            messagebox.showwarning("无法安装", "没有定位到可用的游戏主程序。")
+            return None
+        return Path(self.chosen_exe).parent
+
+    def _opti_preflight(self, target_dir: Path, bundle: str, quiet: bool = False):
+        acr = ac.scan(self.selected.root)
+        checks = optiscaler.preflight(
+            target_dir, bundle, self._current_multiplier(),
+            running_names=[self.chosen_exe.name] if self.chosen_exe else [],
+            anticheat=acr,
+        )
+        if not quiet:
+            self._log("—" * 30)
+            for c in checks:
+                tag = {"ok": "dim", "warn": "warn", "error": "err"}.get(c.level, "")
+                self._log(f"[{c.level.upper()}] {c.title}"
+                          + (f" — {c.detail.splitlines()[0]}" if c.detail else ""), tag)
+        return checks
+
+    def _opti_preview(self, bundle: str) -> None:
+        target_dir = self._opti_target()
+        if target_dir is None:
+            return
+        checks = self._opti_preflight(target_dir, bundle)
+        plan = optiscaler.make_plan(target_dir, self.chosen_exe, bundle,
+                                    self._current_multiplier(),
+                                    game_name=self.selected.name,
+                                    high_res_mv=bool(self.hiresmv_var.get()))
+        spec = optiscaler.get_bundle(bundle)
+        lines = [
+            f"安装目录：{target_dir}",
+            f"引擎包：{spec.display_name}",
+            f"倍率：{self._current_multiplier()}X",
+            f"代理入口：{plan.proxy}",
+            "",
+        ]
+        for it in plan.items:
+            act = {"copy": "写入", "skip": "跳过（已一致）",
+                   "remove": "删除"}.get(it.action, it.action)
+            lines.append(f"[{act}] {it.rel}　{it.note}")
+        for rel in plan.cleanup:
+            lines.append(f"[清理] {rel}（上次装在别的入口名下）")
+
+        self._log("—" * 30)
+        self._log("预览（未做任何改动）：", "warn")
+        for ln in lines:
+            self._log("   " + ln)
+
+        errors = [c for c in checks if c.level == "error"]
+        if errors:
+            messagebox.showerror(
+                "预检未通过",
+                "\n".join(f"· {c.title}\n  {c.detail}" for c in errors),
+            )
+        else:
+            messagebox.showinfo(
+                "预览完成",
+                "预检全部通过。将要写入：\n\n" + "\n".join(lines[:8])
+                + "\n\n点「一键安装」开始（写入前会先备份原文件）。",
+            )
+
+    def _opti_install(self, bundle: str) -> None:
+        target_dir = self._opti_target()
+        if target_dir is None:
+            return
+        checks = self._opti_preflight(target_dir, bundle)
+        errors = [c for c in checks if c.level == "error"]
+        if errors:
+            detail = "\n".join(f"· {c.title}\n  {c.detail}" for c in errors)
+            self._log("预检未通过，已中止", "err")
+            if any("写入权限" in c.title for c in errors):
+                if messagebox.askyesno("需要管理员权限", f"{detail}\n\n要以管理员身份重新启动本工具吗？"):
+                    self._relaunch_as_admin()
+                return
+            messagebox.showerror("预检未通过", detail)
+            return
+
+        spec = optiscaler.get_bundle(bundle)
+        mult = self._current_multiplier()
+        warn = "\n".join(f"· {c.title}" for c in checks if c.level == "warn")
+        msg = (
+            f"游戏：{self.selected.name}\n"
+            f"安装目录：{target_dir}\n"
+            f"引擎包：{spec.display_name}\n"
+            f"倍率：{mult}X\n"
+            f"代理入口：{optiscaler.pick_proxy(target_dir, bundle)[0]}\n\n"
+            "本引擎会写入多个文件（含子目录），覆盖前会先备份原文件。\n"
+            "这些文件全部登记在册，点「卸载并还原」会逐个删除并还原原文件。\n\n"
+            "注意：本引擎与 DLSSG 引擎互斥，装了这个就不能再装那个。\n"
+        )
+        if warn:
+            msg += "\n提醒：\n" + warn + "\n"
+        msg += "\n确认开始安装吗？"
+        if not messagebox.askyesno("确认安装", msg, icon="warning"):
+            self._log("用户取消了安装")
+            return
+        self._opti_install_now(target_dir, bundle)
+
+    def _opti_install_now(self, target_dir: Path, bundle: str) -> None:
+        mult = self._current_multiplier()
+        hires = bool(self.hiresmv_var.get())
+        game = self.selected.name
+
+        def work():
+            return optiscaler.install(target_dir, self.chosen_exe, bundle, mult,
+                                      game_name=game, high_res_mv=hires)
+
+        def done(res):
+            if not res.success:
+                self._log(res.message, "err")
+                messagebox.showerror("安装失败（已自动回滚）", res.message
+                                     + "\n\n游戏目录已恢复到安装前的状态，未做任何残留改动。")
+            else:
+                self._log(res.message, "ok")
+                for n in res.installed:
+                    self._log(f"   已写入 {target_dir / n}", "ok")
+                if res.backup_dir:
+                    self._log(f"   原文件备份：{res.backup_dir}", "dim")
+                vr = optiscaler.verify_installed(target_dir)
+                self._log("   体检：" + ("完好" if vr.healthy else "异常"),
+                          "ok" if vr.healthy else "err")
+                self._render_detail()
+                self._refresh_installed_label()
+                extra = ""
+                if bundle == "optiscaler-dlss5":
+                    extra = ("\n\nDLSS 5 神经网络渲染是实验性的：如果画面异常或游戏起不来，"
+                             "直接点「卸载并还原」即可完全恢复。")
+                messagebox.showinfo(
+                    "安装成功",
+                    f"{res.message}\n\n现在启动游戏，按 Insert 打开 OptiScaler 菜单，"
+                    f"确认 Frame Generation 已开启（输出应为 XeFG）。{extra}",
+                )
+            self._set_status("就绪")
+
+        self._run(work, done, status="正在安装（备份 → 写入 → 校验）…")
+
+    # ------------------------------------------------------------------
     # 操作
     # ------------------------------------------------------------------
 
     def do_preview(self) -> None:
+        engine, bundle = self._current_engine()
+        if engine == state.ENGINE_OPTISCALER:
+            self._opti_preview(bundle)
+            return
         got = self._collect()
         if not got:
             return
@@ -877,6 +1177,10 @@ class App(tk.Tk):
             )
 
     def do_install(self) -> None:
+        engine, bundle = self._current_engine()
+        if engine == state.ENGINE_OPTISCALER:
+            self._opti_install(bundle)
+            return
         got = self._collect()
         if not got:
             return
@@ -1005,27 +1309,29 @@ class App(tk.Tk):
             messagebox.showinfo("请先选游戏", "请在左边列表里选一个游戏。")
             return
         target_dir = Path(self.chosen_exe).parent
-        vr = installer.verify(target_dir)
+        vr = installer.verify_any(target_dir)
         if not vr.installed:
             messagebox.showinfo("没有安装记录", f"本工具没有在\n{target_dir}\n安装过东西。")
             return
         rec = vr.record or {}
+        which = installer.engine_of(rec) if rec else ""
         warn = ""
         if any(c.level == "warn" and "正在运行" in c.title for c in vr.details):
             warn = "\n⚠ 检测到游戏正在运行，请先完全退出游戏，否则文件被占用会删除失败。\n"
         if not messagebox.askyesno(
             "确认卸载",
             f"将从下面这个目录移除本工具的文件，并还原安装前的原始文件：\n\n{target_dir}\n"
+            f"引擎：{installer.engine_label(which) if which else '（未知）'}\n"
             f"{warn}\n安装时间：{rec.get('installed_at', '—')}\n\n继续吗？",
         ):
             return
 
         def work():
-            return installer.uninstall(target_dir)
+            return installer.uninstall_any(target_dir)
 
-        def done(res: installer.UninstallResult):
+        def done(res):
             self._log(res.message, "ok" if res.success else "err")
-            if res.restored:
+            if getattr(res, "restored", None):
                 self._log(f"   已还原：{'、'.join(res.restored)}", "ok")
             self._render_detail()
             self._refresh_installed_label()

@@ -9,6 +9,13 @@ build/
 payload/**/*.dll
 payload/*.dll
 
+# OptiScaler 引擎包 —— 同样不入库，用 tools/fetch_optiscaler.py 从本地压缩包提取。
+# 整目录排除：里面除了 DLL 还有配置模板和第三方许可文件，都不该进仓库。
+# 理由：OptiScaler 是 GPLv3，Intel XeSS SDK 的许可禁止逆向与运行时修改，
+# 而 DLSS 5 那份 nvngx_dlssnr.dll 更是未签名的预览版组件 —— 由使用者自行获取。
+payload/optiscaler-xess/
+payload/optiscaler-dlss5/
+
 # Python
 __pycache__/
 *.py[cod]

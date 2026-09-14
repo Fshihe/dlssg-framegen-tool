@@ -76,6 +76,20 @@ def exe_dir() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def payload_base() -> Path:
+    """payload/ 的根目录。
+
+    优先用 exe 旁边的（用户可自行替换上游文件），否则用内置解包目录。
+    这样源码运行、打包运行、以及"用户手动放一份 payload 在旁边"三种情况
+    走的是同一条查找逻辑。
+    """
+    for base in (exe_dir(), resource_root()):
+        d = base / "payload"
+        if d.is_dir():
+            return d
+    return resource_root() / "payload"
+
+
 # --------------------------------------------------------------------------
 # 日志
 # --------------------------------------------------------------------------
@@ -119,6 +133,7 @@ __all__ = [
     "is_frozen",
     "resource_root",
     "exe_dir",
+    "payload_base",
     "log",
     "journal",
 ]

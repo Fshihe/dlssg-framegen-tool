@@ -22,8 +22,9 @@ from pathlib import Path
 from . import DEFAULT_PROXY, INI_NAME, PROXY_ENTRIES, UPSTREAM_VERSION
 from . import proc
 from . import profiles
-from .profiles import is_our_ini
+from . import state
 from . import winenv
+from .profiles import is_our_ini
 from .gpu import VERDICT_OK, VERDICT_NOT_NEEDED
 from .paths import (
     backups_root,
@@ -247,53 +248,22 @@ def read_ini_router(path: str | Path) -> str:
 
 
 # --------------------------------------------------------------------------
-# 状态存储
+# 状态存储 —— 实现已移到 state.py（两个引擎共用，且避免循环依赖）
 # --------------------------------------------------------------------------
 
-def load_state() -> dict:
-    try:
-        p = state_file()
-        if p.is_file():
-            return json.loads(p.read_text("utf-8"))
-    except Exception as exc:
-        log(f"读取状态文件失败: {exc}", "warn")
-    return {"version": 1, "installs": []}
-
-
-def save_state(state: dict) -> None:
-    ensure_dirs()
-    p = state_file()
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
-    os.replace(tmp, p)
-
-
-def record_install(rec: dict) -> None:
-    st = load_state()
-    st.setdefault("installs", [])
-    # 同一目标目录只保留最新一条
-    st["installs"] = [i for i in st["installs"] if i.get("target_dir", "").lower() != rec["target_dir"].lower()]
-    st["installs"].append(rec)
-    save_state(st)
-
-
-def forget_install(target_dir: str | Path) -> None:
-    st = load_state()
-    key = str(target_dir).lower()
-    st["installs"] = [i for i in st.get("installs", []) if i.get("target_dir", "").lower() != key]
-    save_state(st)
-
-
-def find_install(target_dir: str | Path) -> dict | None:
-    key = str(target_dir).lower()
-    for i in load_state().get("installs", []):
-        if i.get("target_dir", "").lower() == key:
-            return i
-    return None
-
-
-def all_installs() -> list[dict]:
-    return load_state().get("installs", [])
+from .state import (          # noqa: E402  (放在这里是为了贴近原有调用位置)
+    ENGINE_DLSSG,
+    ENGINE_OPTISCALER,
+    all_installs,
+    engine_of,
+    engine_label,
+    find_install,
+    forget_install,
+    load_state,
+    other_engine_install,
+    record_install,
+    save_state,
+)
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +310,129 @@ def check_write_access(directory: Path) -> tuple[bool, str]:
         except Exception:
             pass
         return False, f"{type(exc).__name__}: {exc}"
+
+
+# --------------------------------------------------------------------------
+# 外来帧生成 Mod 识别
+# --------------------------------------------------------------------------
+#
+# 这些包会往游戏目录塞代理 DLL，和我们抢同一条渲染路径。用户往往不记得
+# 自己装过 —— 所以要在安装前替他认出来，而不是等游戏起不来了再猜。
+#
+# 判据分两级：
+#   1. 特征文件名 —— 只要存在就说明大概率有（libxess_fg / XeSSMFG / fakenvapi ...）
+#   2. PE 版本信息里的 OriginalFilename —— OptiScaler 改名后这一项仍是
+#      OptiScaler.dll，这是它自己安装脚本的判据，可靠得多
+
+_FOREIGN_MARKERS: tuple[tuple[str, str], ...] = (
+    ("libxess_fg.dll", "OptiScaler / XeSS 多帧生成"),
+    ("XeSSMFG.dll", "XeSSMFG 多帧生成（外部 loader）"),
+    ("OptiScaler.ini", "OptiScaler 的配置文件"),
+    ("OptiScaler.dll", "OptiScaler 本体"),
+    ("fakenvapi.dll", "fakenvapi（Nukem/OptiScaler 系）"),
+    ("dlssg_to_fsr3_amd_is_better.dll", "dlssg_to_fsr3（DLSS→FSR3 插帧）"),
+    ("dlssg_to_fsr3_amd_is_better-3-0.dll", "dlssg_to_fsr3 3.0"),
+    ("dlss-enabler.dll", "DLSS Enabler"),
+    ("dlss-enabler-headless.dll", "DLSS Enabler (headless)"),
+    ("nvngx.dll_dlssnr.dll", "DLSS 5 神经网络渲染转发器"),
+    ("nvngx_dlssnr.dll", "DLSS 5 神经网络渲染模型"),
+    ("DlssOverrides", "OptiScaler DLSS 覆盖目录"),
+)
+
+# 这些入口名被改名后靠内容认
+_FOREIGN_PROXY_NAMES = (
+    "dxgi.dll", "winmm.dll", "version.dll", "dbghelp.dll", "dinput8.dll",
+    "d3d12.dll", "wininet.dll", "winhttp.dll",
+)
+
+
+def foreign_mods(target_dir: str | Path) -> list[str]:
+    """扫出目录里**第三方**的帧生成/超分 Mod。返回人类可读的条目。
+
+    必须把我们自己装的东西排除掉 —— 否则用户装完 OptiScaler 引擎再来装
+    DLSSG，会被提示"检测到别的 Mod"，而那个"别的 Mod"其实是我们自己刚放的。
+    这种误导会让人去删根本不该删的文件。
+
+    只报告，不改动任何东西 —— 识别不等于有权限替用户删。
+    """
+    target_dir = Path(target_dir)
+    hits: list[str] = []
+
+    # 先把"属于本工具"的文件算出来
+    mine: set[str] = set()
+    try:
+        from . import optiscaler
+
+        mine |= set(optiscaler.detect_ours(target_dir).keys())
+    except Exception:
+        pass
+    try:
+        mine |= set(detect_ours(target_dir).keys())
+    except Exception:
+        pass
+
+    def is_mine(rel: str) -> bool:
+        return rel.replace("\\", "/") in {m.replace("\\", "/") for m in mine}
+
+    for marker, label in _FOREIGN_MARKERS:
+        p = target_dir / marker
+        if not p.exists():
+            continue
+        if is_mine(marker):
+            continue
+        # 目录型标记（DlssOverrides）不是我们建的，单独判断
+        if p.is_file() and is_our_file_any(p):
+            continue
+        hits.append(f"{marker}（{label}）")
+
+    # 按 PE 里的原始文件名认被改名的代理
+    try:
+        from .optiscaler import _pe_original_filename
+    except Exception:
+        _pe_original_filename = None  # type: ignore[assignment]
+
+    if _pe_original_filename is not None:
+        seen_names = {h.split("（")[0] for h in hits}
+        for name in _FOREIGN_PROXY_NAMES:
+            if name in seen_names or is_mine(name):
+                continue
+            p = target_dir / name
+            if not p.is_file():
+                continue
+            if is_our_file_any(p):
+                continue
+            try:
+                orig = _pe_original_filename(p)
+            except Exception:
+                continue
+            low = (orig or "").lower()
+            if low == "optiscaler.dll":
+                hits.append(f"{name}（实为 OptiScaler 改名，PE 原始名 OptiScaler.dll）")
+
+    return hits
+
+
+def is_our_file_any(path: str | Path) -> bool:
+    """按内容判断这个文件是不是本工具任何一个引擎放的。"""
+    p = Path(path)
+    if not p.is_file():
+        return False
+    try:
+        digest = try_hash(p)
+    except Exception:
+        return False
+    if not digest:
+        return False
+    from .payload_manifest import ALL_HASHES
+
+    if digest in ALL_HASHES:
+        return True
+    try:
+        from . import optiscaler
+
+        return digest in optiscaler.all_payload_hashes()
+    except Exception:
+        return False
 
 
 def preflight(
@@ -483,7 +576,7 @@ def preflight(
     dest = target_dir / dll_name
     ini = target_dir / INI_NAME
     prev = find_install(target_dir)
-    ours = bool(prev and prev.get("proxy") == dll_name)
+    ours = bool(prev and engine_of(prev) == ENGINE_DLSSG and prev.get("proxy") == dll_name)
     if dest.exists():
         if ours:
             pf.add("ok", "该入口是本工具此前安装的", f"{dll_name}（会先备份再覆盖）")
@@ -498,6 +591,41 @@ def preflight(
 
     if ini.exists() and not ours:
         pf.add("warn", "已存在 dlssg_sm86.ini", "会先备份再覆盖（可能是你手改过的配置）")
+
+    # 8.5 引擎互斥：这个目录是不是已经装了 OptiScaler 引擎
+    _other = other_engine_install(target_dir, ENGINE_DLSSG)
+    if _other:
+        pf.add("error", "该目录已安装另一个引擎", state.conflict_message(_other, ENGINE_DLSSG))
+    else:
+        # 记录可能被清理过，但文件还在 —— 按内容再认一遍。
+        # 少了这一步，状态文件一丢，互斥保护就静默失效了。
+        try:
+            from . import optiscaler
+
+            if optiscaler.detect_ours(target_dir):
+                pf.add(
+                    "error",
+                    "该目录已安装另一个引擎（按文件内容识别）",
+                    "这个目录里已经有本工具装的 OptiScaler 引擎文件，但没有对应的安装记录"
+                    "（状态文件可能被清理过）。\n\n"
+                    "请先执行一次「卸载」—— 本工具会按文件内容识别并清理干净 —— "
+                    "然后再安装 DLSSG 引擎。",
+                )
+        except Exception:
+            pass
+
+    # 8.6 外来 Mod：认得出名字的那些，比"文件名被占用"说得更清楚
+    _foreign = foreign_mods(target_dir)
+    if _foreign:
+        pf.add(
+            "error",
+            "检测到别的帧生成 Mod",
+            "这个目录里已经有第三方帧生成/超分 Mod，它们同样会钩住渲染路径，"
+            "与本工具叠加会互相打架：\n  · " + "\n  · ".join(_foreign)
+            + "\n\n请先用它们自带的卸载方式清理干净，再安装本工具。",
+        )
+    else:
+        pf.add("ok", "未检测到其他帧生成 Mod")
 
     # 9. payload 完整性（按当前 profile 校验）
     pl = resolve_payload(dll_name, profile=prof)
@@ -804,6 +932,7 @@ def execute_plan(plan: InstallPlan, dry_run: bool = False) -> InstallResult:
 
         # 3) 记录状态
         rec = {
+            "engine": ENGINE_DLSSG,
             "game_name": plan.game_name,
             "target_dir": str(target_dir),
             "exe": str(plan.exe_path) if plan.exe_path else "",
@@ -1141,6 +1270,56 @@ def restore_backup(backup_dir: str | Path, target_dir: str | Path) -> UninstallR
     return res
 
 
+# --------------------------------------------------------------------------
+# 引擎调度
+# --------------------------------------------------------------------------
+#
+# 卸载和体检必须按"当初装的是哪个引擎"路由。用户不该关心这件事 ——
+# 他只知道"我装过这个工具的东西，现在想卸掉"。
+#
+# 顺序：先看安装记录；记录丢了就按内容认（两个引擎都支持按哈希识别）。
+
+def engine_present(target_dir: str | Path) -> str:
+    """这个目录当前装的是哪个引擎。没装就返回空串。"""
+    rec = find_install(target_dir)
+    if rec:
+        return engine_of(rec)
+
+    from . import optiscaler
+
+    if optiscaler.detect_ours(target_dir):
+        return ENGINE_OPTISCALER
+    if detect_ours(target_dir):
+        return ENGINE_DLSSG
+    return ""
+
+
+def uninstall_any(target_dir: str | Path, force: bool = False):
+    """按引擎路由卸载。返回对象都带 success / message / removed / restored。"""
+    which = engine_present(target_dir)
+    if which == ENGINE_OPTISCALER:
+        from . import optiscaler
+
+        return optiscaler.uninstall_installed(target_dir, force=force)
+    return uninstall(target_dir, force=force)
+
+
+def verify_any(target_dir: str | Path) -> VerifyResult:
+    """按引擎路由体检，统一成 VerifyResult。"""
+    which = engine_present(target_dir)
+    if which == ENGINE_OPTISCALER:
+        from . import optiscaler
+
+        vr = optiscaler.verify_installed(target_dir)
+        return VerifyResult(
+            installed=vr.installed,
+            healthy=vr.healthy,
+            details=[Check(lv, t, d) for lv, t, d in vr.details],
+            record=find_install(target_dir),
+        )
+    return verify(target_dir)
+
+
 __all__ = [
     "sha256_file",
     "resolve_payload",
@@ -1155,9 +1334,19 @@ __all__ = [
     "detect_ours",
     "uninstall",
     "restore_backup",
+    "foreign_mods",
+    "engine_present",
+    "uninstall_any",
+    "verify_any",
     "find_install",
     "all_installs",
     "load_state",
+    "state",
+    "ENGINE_DLSSG",
+    "ENGINE_OPTISCALER",
+    "engine_of",
+    "engine_label",
+    "other_engine_install",
     "Check",
     "Preflight",
     "InstallPlan",

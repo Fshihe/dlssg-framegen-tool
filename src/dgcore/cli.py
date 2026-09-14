@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import APP_NAME, INI_NAME, UPSTREAM_REPO, UPSTREAM_VERSION, VERSION
 from . import anticheat as ac
-from . import games, gpu, installer, pe, profiles, report
+from . import games, gpu, installer, optiscaler, pe, profiles, report
 from .paths import logs_root, reports_root
 
 
@@ -195,6 +195,8 @@ def cmd_check(args) -> int:
     env = gpu.detect()
     root, exe, target = resolve_target(args.path, args.router)
     router = args.router if args.router != "auto" else env.router
+    if _is_opti(args):
+        return _oi_check(args, root, exe, Path(target))
     proxy = args.proxy or installer.auto_pick_proxy(Path(target))[0]
     _hdr("安装前预检")
     out(f"游戏目录  : {target}")
@@ -210,9 +212,153 @@ def cmd_check(args) -> int:
     return 0 if pf.ok else 2
 
 
+# --------------------------------------------------------------------------
+# OptiScaler 引擎（XeSS 帧生成 / DLSS 5）—— 与 DLSSG 引擎互斥
+# --------------------------------------------------------------------------
+
+def _is_opti(args) -> bool:
+    return (getattr(args, "engine", "dlssg") or "dlssg").lower() == "optiscaler"
+
+
+def _oi_bundle(args) -> str:
+    want = getattr(args, "bundle", None)
+    if want and optiscaler.get_bundle(want):
+        return want
+    return optiscaler.default_bundle()
+
+
+def _oi_mult(args) -> int:
+    return optiscaler.normalize_multiplier(int(getattr(args, "multiplier", 4) or 4))
+
+
+def _oi_hires_mv(args):
+    """把 --high-res-mv 的三态映射成 build_ini 要的 True/False/None。"""
+    v = (getattr(args, "high_res_mv", "on") or "on").lower()
+    if v == "auto":
+        return None
+    return v != "off"
+
+
+def _print_oi_checks(checks) -> None:
+    marks = {"ok": "[ OK ]", "warn": "[WARN]", "error": "[FAIL]"}
+    for c in checks:
+        out(f"{marks.get(c.level, '[????]')} {c.title}")
+        if c.detail:
+            for ln in str(c.detail).splitlines():
+                out(f"        {ln}")
+
+
+def _oi_check(args, root, exe, tdir: Path) -> int:
+    bundle = _oi_bundle(args)
+    spec = optiscaler.get_bundle(bundle)
+    _hdr("安装前预检（OptiScaler 引擎）")
+    out(f"游戏目录  : {tdir}")
+    out(f"主程序    : {exe or '(未找到)'}")
+    out(f"引擎包    : {spec.display_name if spec else bundle}")
+    out(f"倍率      : {_oi_mult(args)}X")
+    out("")
+    acr = ac.scan(root)
+    checks = optiscaler.preflight(tdir, bundle, _oi_mult(args),
+                                  running_names=[Path(exe).name] if exe else [],
+                                  anticheat=acr)
+    _print_oi_checks(checks)
+    ok = not any(c.level == "error" for c in checks)
+    out("")
+    out(f"结论：{'可以安装' if ok else '存在阻断问题，不能安装'}")
+    return 0 if ok else 2
+
+
+def _oi_plan(args, root, exe, tdir: Path) -> int:
+    bundle = _oi_bundle(args)
+    mult = _oi_mult(args)
+    plan = optiscaler.make_plan(tdir, exe, bundle, mult, game_name=root.name,
+                                high_res_mv=_oi_hires_mv(args))
+    _hdr("将要执行的改动（预演，不会真的写入）")
+    out(f"引擎包：{optiscaler.get_bundle(bundle).display_name}")
+    out(f"倍率  ：{mult}X（{optiscaler.multiplier_label(mult)}）")
+    out(f"代理入口：{plan.proxy}")
+    out("")
+    for it in plan.items:
+        act = {"copy": "写入", "skip": "跳过（内容已一致）", "remove": "删除"}.get(it.action, it.action)
+        out(f"  [{act}] {it.rel}   {it.note}")
+    if plan.cleanup:
+        out("")
+        out("  另外会清理上次装在别的入口名下的孤儿代理：")
+        for rel in plan.cleanup:
+            out(f"    [清理] {rel}")
+    out("")
+    out("生成的 OptiScaler.ini（仅头部与关键项）")
+    out("-" * 60)
+    for ln in plan.ini_text.splitlines()[:30]:
+        out(ln)
+    out("-" * 60)
+    out("（完整配置是在引擎包自带模板上定点修改生成的，此处只显示头部）")
+    return 0
+
+
+def _oi_install(args, root, exe, tdir: Path) -> int:
+    bundle = _oi_bundle(args)
+    mult = _oi_mult(args)
+    spec = optiscaler.get_bundle(bundle)
+
+    _hdr("安装 OptiScaler 帧生成（XeSS / DLSS 5）")
+    out(f"游戏    : {root.name}")
+    out(f"游戏目录: {tdir}")
+    out(f"主程序  : {exe or '(未找到)'}")
+    out(f"引擎包  : {spec.display_name}")
+    out(f"倍率    : {mult}X（{optiscaler.multiplier_label(mult)}）")
+
+    acr = ac.scan(root)
+    checks = optiscaler.preflight(tdir, bundle, mult,
+                                  running_names=[Path(exe).name] if exe else [],
+                                  anticheat=acr)
+    out("")
+    _print_oi_checks(checks)
+    errors = [c for c in checks if c.level == "error"]
+    if errors:
+        out("")
+        out("存在阻断问题，已中止。请按上面的提示处理后重试。")
+        return 2
+
+    if args.dry_run:
+        out("")
+        out("（--dry-run：到此为止，未做任何改动）")
+        return 0
+
+    if not args.yes:
+        out("")
+        try:
+            ans = input("确认执行？输入 y 回车继续：").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            out("已取消，未做任何改动。")
+            return 1
+
+    res = optiscaler.install(tdir, exe, bundle, mult, game_name=root.name,
+                             high_res_mv=_oi_hires_mv(args))
+    out("")
+    if not res.success:
+        out(res.message)
+        for e in res.errors:
+            out(f"  {e}")
+        return 1
+    out(res.message)
+    out("")
+    out("接下来：")
+    out("  1. 启动游戏，按 Insert 打开 OptiScaler 菜单")
+    out("  2. 确认 Frame Generation 是开启的（编辑器里 FGOutput 应为 XeFG）")
+    out("  3. 倍率可在菜单里临时改，也可以回来重装换档")
+    out("")
+    out("不想要了随时执行：uninstall " + str(tdir))
+    return 0
+
+
 def cmd_plan(args) -> int:
     env = gpu.detect()
     root, exe, target = resolve_target(args.path, args.router)
+    if _is_opti(args):
+        return _oi_plan(args, root, exe, Path(target))
     router = args.router if args.router != "auto" else env.router
     prof = profiles.for_router(router, prefer=getattr(args, "upstream", None))
     proxy, why = ((args.proxy, "手动指定") if args.proxy
@@ -245,6 +391,8 @@ def cmd_plan(args) -> int:
 def cmd_install(args) -> int:
     env = gpu.detect()
     root, exe, target = resolve_target(args.path, args.router)
+    if _is_opti(args):
+        return _oi_install(args, root, exe, Path(target))
     router = args.router if args.router != "auto" else env.router
     prof = profiles.for_router(router, prefer=getattr(args, "upstream", None))
     proxy, why = ((args.proxy, "手动指定") if args.proxy
@@ -327,12 +475,15 @@ def cmd_install(args) -> int:
 def cmd_uninstall(args) -> int:
     root, exe, target = resolve_target(args.path)
     tdir = Path(target)
+    which = installer.engine_present(tdir)
     _hdr("卸载并还原")
     out(f"游戏目录：{tdir}")
-    res = installer.uninstall(tdir, force=args.force)
+    if which:
+        out(f"安装的引擎：{installer.engine_label(which)}")
+    res = installer.uninstall_any(tdir, force=args.force)
     out("")
     out(res.message)
-    if res.restored:
+    if getattr(res, "restored", None):
         out(f"已还原：{'、'.join(res.restored)}")
     out(f"结果：{'成功' if res.success else '未完成'}")
     return 0 if res.success else 1
@@ -341,7 +492,7 @@ def cmd_uninstall(args) -> int:
 def cmd_verify(args) -> int:
     root, exe, target = resolve_target(args.path)
     _hdr("安装体检")
-    vr = installer.verify(Path(target))
+    vr = installer.verify_any(Path(target))
     out(f"目录：{target}")
     out(f"本工具安装过：{'是' if vr.installed else '否'}")
     out("")
@@ -520,6 +671,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="计算路由（默认自动按显卡判断）")
         sp.add_argument("--upstream", choices=list(profiles.PROFILES),
                         help="强制指定上游版本（默认按路由自动选：SM86→0.3.0，SM75→0.2.4）")
+        sp.add_argument("--engine", default="dlssg", choices=["dlssg", "optiscaler"],
+                        help="用哪个引擎：dlssg（NVIDIA DLSS 帧生成）或 "
+                             "optiscaler（XeSS 帧生成 / DLSS 5）。两者互斥。")
+        sp.add_argument("--bundle", choices=optiscaler.bundle_keys(),
+                        help="optiscaler 引擎的引擎包（默认 xess）")
+        sp.add_argument("--multiplier", type=int, default=4,
+                        help="optiscaler 引擎的帧生成倍率 2/3/4/5/6（默认 4）")
+        sp.add_argument("--high-res-mv", default="on", choices=["on", "off", "auto"],
+                        help="XeFG 运动矢量按高分辨率处理。黑神话这类 UE5 游戏必须 on "
+                             "（默认 on）；auto 表示不覆盖上游默认值")
 
     sp = sub.add_parser("detect", help="检测显卡与系统环境")
     sp.add_argument("--json", action="store_true")

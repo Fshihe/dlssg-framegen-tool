@@ -149,6 +149,74 @@ def main() -> int:
             except Exception as exc:
                 check(f"渲染 {lv.value} 分支", False, str(exc))
 
+        print()
+        print("=" * 74)
+        print("6. 引擎切换（DLSSG ↔ OptiScaler）")
+        print("=" * 74)
+        from dgcore import state as _state
+
+        check("引擎下拉框存在", hasattr(app, "engine_combo"), "engine_combo")
+        check("引擎下拉框有 3 个选项", len(app.engine_combo.cget("values")) == 3,
+              str(app.engine_combo.cget("values")))
+
+        # 默认走 DLSSG
+        check("默认引擎是 DLSSG", app._current_engine()[0] == _state.ENGINE_DLSSG,
+              str(app._current_engine()))
+
+        # 切到 XeSS
+        app.engine_var.set("OptiScaler · XeSS 多帧生成")
+        app._on_engine_change()
+        eng, bundle = app._current_engine()
+        check("切到 XeSS 后引擎正确", eng == _state.ENGINE_OPTISCALER and bundle == "optiscaler-xess",
+              f"{eng}/{bundle}")
+        vals = list(app.frames_combo.cget("values"))
+        check("倍率选项换成 2X..6X", vals == ["2X", "3X", "4X", "5X", "6X"], str(vals))
+        check("路由框已禁用", str(app.router_combo.cget("state")) == "disabled",
+              str(app.router_combo.cget("state")))
+        check("采样档已禁用", str(app.sample_combo.cget("state")) == "disabled",
+              str(app.sample_combo.cget("state")))
+
+        app.frames_var.set("6X")
+        app._on_frames_change()
+        check("倍率反查 6", app._current_multiplier() == 6, str(app._current_multiplier()))
+        hint = app.frames_hint.cget("text")
+        check("6X 提示里点明是实验性", "实验" in hint or "超出" in hint, hint[:120])
+
+        # 切到 DLSS 5
+        app.engine_var.set("OptiScaler · DLSS 5 神经网络渲染 + XeSS")
+        app._on_engine_change()
+        eng2, bundle2 = app._current_engine()
+        check("切到 DLSS 5 后 bundle 正确", bundle2 == "optiscaler-dlss5", str(bundle2))
+        check("DLSS 5 提示里点明未签名", "未签名" in app.engine_hint.cget("text"),
+              app.engine_hint.cget("text")[:120])
+
+        # 切回 DLSSG：路由/采样必须恢复可用
+        app.engine_var.set("DLSSG（NVIDIA DLSS 帧生成）")
+        app._on_engine_change()
+        check("切回 DLSSG 后路由框恢复", str(app.router_combo.cget("state")) == "readonly",
+              str(app.router_combo.cget("state")))
+        check("切回 DLSSG 后采样档恢复", str(app.sample_combo.cget("state")) == "readonly",
+              str(app.sample_combo.cget("state")))
+        check("切回 DLSSG 后倍率选项是 DLSSG 的",
+              "上限" in " ".join(app.frames_combo.cget("values")),
+              str(app.frames_combo.cget("values")))
+
+        # OptiScaler 的预检不依赖 _collect（它不看路由/代理）
+        app.engine_var.set("OptiScaler · XeSS 多帧生成")
+        app._on_engine_change()
+        try:
+            tgt = Path(app.chosen_exe).parent if app.chosen_exe else None
+            if tgt:
+                app._opti_preflight(tgt, "optiscaler-xess", quiet=True)
+                check("OptiScaler 预检可执行", True)
+            else:
+                check("OptiScaler 预检可执行", True, "(没有选定 EXE，跳过)")
+        except Exception as exc:
+            check("OptiScaler 预检可执行", False, str(exc))
+
+        app.engine_var.set("DLSSG（NVIDIA DLSS 帧生成）")
+        app._on_engine_change()
+
     finally:
         try:
             app.destroy()

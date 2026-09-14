@@ -1,9 +1,13 @@
 """一键构建：校验 payload → 生成图标 → PyInstaller 打包 → 输出哈希。
 
 用法：
-    python build.py              # 完整构建（内置两个上游版本的代理 DLL，离线自包含）
-    python build.py --slim       # 精简版：只内置 0.3.0 的 version.dll
-    python build.py --no-verify  # 跳过构建后的自检
+    python build.py                    # 完整构建（DLSSG 两个版本 + OptiScaler 两个引擎包）
+    python build.py --no-opti          # 不带 OptiScaler 引擎包（体积小一半以上）
+    python build.py --slim             # 精简版：只内置 0.3.0 的 version.dll
+    python build.py --no-verify        # 跳过构建后的自检
+
+体积提示：OptiScaler 的 DLSS 5 引擎包里有 158 MB 的 nvngx_dlssnr.dll，
+带上它产物会明显变大。只想测 XeSS 的话用 --no-opti 再单独放也行。
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ DIST = ROOT / "dist"
 WORK = ROOT / "work"
 
 sys.path.insert(0, str(SRC))
+from dgcore import optiscaler  # noqa: E402
 from dgcore import profiles  # noqa: E402
 from dgcore import VERSION as APP_VERSION  # noqa: E402
 
@@ -45,19 +50,23 @@ def step(msg: str) -> None:
     print("=" * 70)
 
 
-def verify_payload(slim: bool) -> None:
-    step("① 校验 payload 完整性")
+def dlssg_plan(slim: bool) -> list[tuple[str, str]]:
     if slim:
-        # 精简版只带 0.3.0 的 version.dll
-        plan = [("0.3.0", "version.dll")]
-    else:
-        plan = [
-            (v, n)
-            for v in profiles.all_versions()
-            for n in profiles.get(v).proxy_names
-        ]
+        return [("0.3.0", "version.dll")]
+    return [
+        (v, n)
+        for v in profiles.all_versions()
+        for n in profiles.get(v).proxy_names
+    ]
 
-    bad = []
+
+def verify_payload(slim: bool, with_opti: bool) -> None:
+    step("① 校验 payload 完整性")
+    bad: list[str] = []
+    n_files = 0
+
+    # DLSSG
+    plan = dlssg_plan(slim)
     for ver, name in plan:
         prof = profiles.get(ver)
         p = PAYLOAD / ver / name
@@ -71,19 +80,36 @@ def verify_payload(slim: bool) -> None:
             continue
         got = sha256(p)
         ok = got == exp_hash
-        print(f"  {'OK  ' if ok else 'FAIL'} {ver}/{name:14} {got[:20]}…  {p.stat().st_size:,} bytes")
+        print(f"  {'OK  ' if ok else 'FAIL'} {ver}/{name:16} {got[:20]}…  {p.stat().st_size:,} bytes")
         if not ok:
             bad.append(f"{ver}/{name}: SHA256 不符")
+        n_files += 1
+
+    # OptiScaler 引擎包
+    n_opti = 0
+    if with_opti:
+        for key in optiscaler.bundle_keys():
+            spec = optiscaler.get_bundle(key)
+            ok, msg = optiscaler.bundle_available(key)
+            print(f"  {'OK  ' if ok else 'FAIL'} {key:16} {spec.total_bytes:,} bytes  {msg}")
+            if not ok:
+                bad.append(f"{key}: {msg}")
+            n_files += len(spec.files)
+            n_opti += 1
 
     if bad:
         print("\n  payload 校验失败：")
         for b in bad:
             print(f"    - {b}")
-        print("\n  提示：先跑 python tools\\fetch_payload.py 获取缺失的 DLL")
+        if with_opti:
+            print("\n  提示：DLSSG 缺文件跑 python tools\\fetch_payload.py；")
+            print("        OptiScaler 缺文件跑 python tools\\fetch_optiscaler.py")
+        else:
+            print("\n  提示：先跑 python tools\\fetch_payload.py 获取缺失的 DLL")
         raise SystemExit(1)
 
-    n_vers = len({v for v, _ in plan})
-    print(f"\n  全部 {len(plan)} 个文件校验通过（覆盖 {n_vers} 个上游版本）")
+    extra = f"，另有 {n_opti} 个 OptiScaler 引擎包" if with_opti else ""
+    print(f"\n  全部 {n_files} 个文件校验通过{extra}")
 
 
 def make_icon() -> Path:
@@ -94,7 +120,7 @@ def make_icon() -> Path:
     return ico
 
 
-def pyinstaller(slim: bool) -> Path:
+def pyinstaller(slim: bool, with_opti: bool) -> Path:
     step("③ PyInstaller 打包")
     ico = ROOT / "assets" / "icon.ico"
     sep = ";" if os.name == "nt" else ":"
@@ -104,15 +130,8 @@ def pyinstaller(slim: bool) -> Path:
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
 
-    # 按 payload/<版本>/<文件> 的目录结构打包进 exe
-    if slim:
-        plan = [("0.3.0", "version.dll")]
-    else:
-        plan = [
-            (v, n)
-            for v in profiles.all_versions()
-            for n in profiles.get(v).proxy_names
-        ]
+    # 按 payload/<版本或引擎包>/<文件> 的目录结构打包进 exe
+    plan = dlssg_plan(slim)
     total = 0
     for ver, name in plan:
         dst_dir = stage / ver
@@ -121,7 +140,26 @@ def pyinstaller(slim: bool) -> Path:
         shutil.copy2(src, dst_dir / name)
         total += src.stat().st_size
     n_vers = len({v for v, _ in plan})
-    print(f"  内置 payload：{len(plan)} 个文件 / {n_vers} 个版本，共 {total:,} bytes")
+    print(f"  内置 DLSSG payload：{len(plan)} 个文件 / {n_vers} 个版本，共 {total:,} bytes")
+
+    n_opti_files = 0
+    if with_opti:
+        for key in optiscaler.bundle_keys():
+            spec = optiscaler.get_bundle(key)
+            root = optiscaler.payload_root(key)
+            for rel, _h, _size in spec.files:
+                src = root / rel
+                dst = stage / key / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                total += src.stat().st_size
+                n_opti_files += 1
+            print(f"  内置引擎包 {key}：{len(spec.files)} 个文件，"
+                  f"{spec.total_bytes:,} bytes")
+    else:
+        print("  （--no-opti：不内置 OptiScaler 引擎包）")
+
+    print(f"  payload 合计：{total:,} bytes ({total / 1048576:.1f} MB)")
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -176,7 +214,8 @@ def write_checksums(exe: Path) -> Path:
     out = DIST / "SHA256SUMS.txt"
     lines = [
         f"# dlssg-cn  v{APP_VERSION}",
-        "# 内置两个上游版本：RTX 30 系走 0.3.0（6X），RTX 20 系走 0.2.4（4X）",
+        "# 引擎一 DLSSG：RTX 30 系走 0.3.0（6X），RTX 20 系走 0.2.4（4X）",
+        "# 引擎二 OptiScaler：XeSS 多帧生成 / DLSS 5 神经网络渲染（与引擎一互斥）",
         "# 上游：https://github.com/sdli1995/dlssg_for_sm86",
         f'# 校验：certutil -hashfile "{exe.name}" SHA256',
         "",
@@ -191,13 +230,17 @@ def write_checksums(exe: Path) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--slim", action="store_true", help="只内置 version.dll")
+    ap.add_argument("--no-opti", action="store_true",
+                    help="不内置 OptiScaler 引擎包（XeSS / DLSS 5），产物小很多")
     ap.add_argument("--no-verify", action="store_true", help="跳过产物自检")
     args = ap.parse_args()
 
+    with_opti = not args.no_opti
+
     print(f"构建目录：{ROOT}")
-    verify_payload(args.slim)
+    verify_payload(args.slim, with_opti)
     make_icon()
-    exe = pyinstaller(args.slim)
+    exe = pyinstaller(args.slim, with_opti)
     if not args.no_verify:
         verify_build(exe)
 
