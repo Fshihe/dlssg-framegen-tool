@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -845,7 +846,62 @@ def run(verbose: bool = True) -> Runner:
         )
 
         # ------------------------------------------------------------------
-        # 17. 路径安全：状态与备份只落在 LOCALAPPDATA
+        # 17c. CLI 输出绝不能因为打印失败而崩
+        #      （真实反馈：管道提前关闭导致 OSError [Errno 22]，
+        #        异常没人接，--windowed 打包的 exe 直接弹了个报错窗口）
+        # ------------------------------------------------------------------
+        from .cli import out as _out
+
+        class _BadStream:
+            def write(self, s):
+                raise OSError(22, "Invalid argument")
+
+            def flush(self):
+                raise OSError(22, "Invalid argument")
+
+            @property
+            def buffer(self):
+                raise OSError(22, "Invalid argument")
+
+        _saved_out, _saved_err = sys.stdout, sys.stderr
+        try:
+            sys.stdout = _BadStream()
+            _out("stdout 坏了")
+            r.check("CLI：stdout 写入抛 OSError 时不崩", True)
+        except Exception as _e:
+            r.check("CLI：stdout 写入抛 OSError 时不崩", False, f"{type(_e).__name__}: {_e}")
+        finally:
+            sys.stdout = _saved_out
+
+        try:
+            sys.stdout = _BadStream()
+            sys.stderr = _BadStream()
+            _out("两个都坏了")
+            r.check("CLI：stdout 和 stderr 同时坏也不崩", True)
+        except Exception as _e:
+            r.check("CLI：stdout 和 stderr 同时坏也不崩", False, f"{type(_e).__name__}: {_e}")
+        finally:
+            sys.stdout = _saved_out
+            sys.stderr = _saved_err
+
+        try:
+            sys.stdout = None
+            _out("stdout 是 None")
+            r.check("CLI：stdout 为 None 时不崩", True)
+        except Exception as _e:
+            r.check("CLI：stdout 为 None 时不崩", False, f"{type(_e).__name__}: {_e}")
+        finally:
+            sys.stdout = _saved_out
+
+        # 含中文 / emoji 也要能正常输出
+        try:
+            _out("中文 ★ ✓ ⚠ emoji😀")
+            r.check("CLI：含中文和特殊字符时正常输出", True)
+        except Exception as _e:
+            r.check("CLI：含中文和特殊字符时正常输出", False, f"{type(_e).__name__}: {_e}")
+
+        # ------------------------------------------------------------------
+        # 18. 路径安全：状态与备份只落在 LOCALAPPDATA
         # ------------------------------------------------------------------
         r.check(
             "路径：备份根目录位于 LOCALAPPDATA",

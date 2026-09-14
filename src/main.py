@@ -70,6 +70,41 @@ def _attach_console() -> None:
         pass
 
 
+def _install_excepthook(cli_mode: bool) -> None:
+    """防止 --windowed 打包的 exe 在异常时弹一个原始回溯窗口。
+
+    打包成 GUI 子程序后，Python 默认的异常处理会弹 MessageBox 显示 traceback。
+    用户看到的就是一个莫名其妙的技术弹窗（真实案例：管道提前关闭导致
+    OSError: [Errno 22]，本该静默处理，却弹窗报错）。
+
+    这里换掉默认行为：能写日志就写日志，能往控制台打就往控制台打，
+    绝不再弹原始回溯。
+    """
+    import traceback
+
+    def hook(exc_type, exc, tb):
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        # 记到工具自己的日志里，方便事后排查
+        try:
+            from dgcore.paths import log as _log
+
+            _log(f"未捕获异常：{exc}\n{text}", "error")
+        except Exception:
+            pass
+        # 命令行模式下打到 stderr（同样要防住 stderr 坏掉）
+        if cli_mode:
+            for stream in (sys.stderr, sys.stdout):
+                try:
+                    if stream is not None:
+                        stream.write(f"\n[内部错误] {exc_type.__name__}: {exc}\n")
+                        return
+                except Exception:
+                    continue
+        # GUI 模式下什么都不弹 —— 界面上已经有日志区了
+
+    sys.excepthook = hook
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     first = argv[0] if argv else ""
@@ -79,13 +114,37 @@ def main(argv: list[str] | None = None) -> int:
     if wants_cli:
         if getattr(sys, "frozen", False):
             _attach_console()
+        _install_excepthook(cli_mode=True)
         from dgcore.cli import main as cli_main
 
         if first == "help":
             argv = ["--help"] + argv[1:]
-        return cli_main(argv)
+        try:
+            return cli_main(argv)
+        except SystemExit:
+            raise
+        except KeyboardInterrupt:
+            return 130
+        except Exception as exc:
+            # 命令行工具不该因为未预期的异常弹窗或吐 traceback
+            import traceback
+
+            text = traceback.format_exc()
+            try:
+                from dgcore.paths import log as _log
+
+                _log(f"CLI 未捕获异常：{exc}\n{text}", "error")
+            except Exception:
+                pass
+            try:
+                sys.stderr.write(f"\n[出错了] {type(exc).__name__}: {exc}\n")
+                sys.stderr.write("详细信息已记入 %LOCALAPPDATA%\\DLSSG-SM86-Tool\\logs\\\n")
+            except Exception:
+                pass
+            return 2
 
     # 默认进 GUI
+    _install_excepthook(cli_mode=False)
     try:
         from dgcore.gui import launch
 

@@ -17,14 +17,31 @@ from .paths import logs_root, reports_root
 
 
 def out(msg: str = "") -> None:
-    try:
-        print(msg)
-    except (UnicodeEncodeError, ValueError):
+    """输出一行。**任何情况下都不允许抛异常。**
+
+    控制台输出失败的原因很杂：代码页不对（UnicodeEncodeError）、
+    stdout 被重定向到已关闭的管道 / 无效句柄（OSError: [Errno 22]）、
+    打包成 GUI 子程序后根本没有标准输出（ValueError / AttributeError）。
+    命令行工具因为"打印失败"而崩掉是最没道理的，所以这里兜到底。
+    """
+    text = f"{msg}\n"
+    # 逐个尝试，任一条成功就返回
+    for attempt in (
+        lambda: sys.stdout.write(text),
+        lambda: sys.stdout.buffer.write(text.encode("utf-8", "replace")),
+        lambda: sys.stderr.write(text),
+        lambda: sys.stderr.buffer.write(text.encode("utf-8", "replace")),
+    ):
         try:
-            sys.stdout.buffer.write((msg + "\n").encode("utf-8", "replace"))
-            sys.stdout.buffer.flush()
+            attempt()
+            try:
+                sys.stdout.flush()
+            except Exception:
+                pass
+            return
         except Exception:
-            pass
+            continue
+    # 全失败（比如完全没有标准流）：静默丢弃，绝不崩
 
 
 def _hdr(title: str) -> None:
