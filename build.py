@@ -24,6 +24,7 @@ WORK = ROOT / "work"
 
 sys.path.insert(0, str(SRC))
 from dgcore import profiles  # noqa: E402
+from dgcore import VERSION as APP_VERSION  # noqa: E402
 
 # 产物名一律用 ASCII —— 中文名在 GitHub Release、部分解压工具和国外网盘上会乱码
 APP_BASENAME = "dlssg-cn"
@@ -164,6 +165,29 @@ def verify_build(exe: Path) -> None:
         raise SystemExit(f"构建产物自检失败，退出码 {r.returncode}")
 
 
+def write_checksums(exe: Path) -> Path:
+    """生成发布用的 SHA256SUMS.txt。
+
+    必须在每次构建后重新生成 —— PyInstaller 会嵌入构建时间戳，
+    同一个源码两次构建出来的哈希是不同的，手工维护的校验和一定会过期。
+    """
+    step("④ 生成校验和文件")
+    digest = sha256(exe)
+    out = DIST / "SHA256SUMS.txt"
+    lines = [
+        f"# dlssg-cn  v{APP_VERSION}",
+        "# 内置两个上游版本：RTX 30 系走 0.3.0（6X），RTX 20 系走 0.2.4（4X）",
+        "# 上游：https://github.com/sdli1995/dlssg_for_sm86",
+        f'# 校验：certutil -hashfile "{exe.name}" SHA256',
+        "",
+        f"{digest}  {exe.name}",
+    ]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"  {out}")
+    print(f"  {digest}")
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--slim", action="store_true", help="只内置 version.dll")
@@ -180,7 +204,12 @@ def main() -> int:
     step("⑤ 完成")
     print(f"  文件   : {exe}")
     print(f"  体积   : {exe.stat().st_size:,} bytes ({exe.stat().st_size/1048576:.1f} MB)")
-    print(f"  SHA256 : {sha256(exe)}")
+    digest = sha256(exe)
+    print(f"  SHA256 : {digest}")
+
+    if not args.no_verify:
+        write_checksums(exe)
+
     return 0
 
 
