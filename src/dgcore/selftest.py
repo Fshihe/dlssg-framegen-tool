@@ -1429,6 +1429,46 @@ def run(verbose: bool = True) -> Runner:
         _pf, _phow = ue.find_engine_ini(_plain)
         r.check("UE 配置：非虚幻布局不误报", _pf is None, str(_pf))
 
+        # 20f. 记录丢失后的兜底清理。
+        #   实测踩到：状态文件被清空 + 卸载找不到记录 → Engine.ini 里那一行
+        #   永远留在用户配置里。而且**虚幻引擎退出时会重写 Engine.ini 并丢掉
+        #   注释行**，所以我们写的标记行会消失，只认标记行等于失效。
+        _orph = tmp / "UEGame3"
+        _orph_win64 = _orph / "Binaries" / "Win64"
+        _orph_win64.mkdir(parents=True)
+        (_orph_win64 / "FakeGame-Win64-Shipping.exe").write_bytes(b"MZ")
+        _orph_ini = _orph / "Saved" / "Config" / "Windows" / "Engine.ini"
+
+        # 情形一：标记行还在
+        _orph_ini.parent.mkdir(parents=True, exist_ok=True)
+        _orph_ini.write_text("[Core.System]\nPaths=x\n", encoding="utf-8", newline="")
+        _o_before = _orph_ini.read_bytes()
+        ue.ensure_dilate_off(_orph_win64)
+        _r1 = ue.strip_orphan(_orph_win64)
+        r.check("UE 配置兜底：靠标记行能清掉残留", _r1.ok and _r1.changed, _r1.detail)
+        r.check("UE 配置兜底：清理后逐字节还原",
+                _orph_ini.read_bytes() == _o_before, repr(_orph_ini.read_bytes()))
+
+        # 情形二：游戏重写文件时把注释行删了，但节里只有我们那一把键
+        _orph_ini.write_text("[Core.System]\nPaths=x\n", encoding="utf-8", newline="")
+        ue.ensure_dilate_off(_orph_win64)
+        _no_mark = ue.read_text(_orph_ini).replace(ue.MARK_LINE + "\n", "")
+        _orph_ini.write_text(_no_mark, encoding="utf-8", newline="")
+        r.check("UE 配置兜底：标记行确实没了", not ue.has_our_mark(ue.read_text(_orph_ini)))
+        _r2 = ue.strip_orphan(_orph_win64)
+        r.check("UE 配置兜底：没有标记行也能按空节判定清掉", _r2.ok and _r2.changed,
+                _r2.detail)
+        r.check("UE 配置兜底：清理后逐字节还原",
+                _orph_ini.read_bytes() == _o_before, repr(_orph_ini.read_bytes()))
+
+        # 情形三：用户自己的 [SystemSettings] 里还有别的键 —— 绝不能动
+        _user = "[Core.System]\nPaths=x\n\n[SystemSettings]\nr.NGX.DLSS.DilateMotionVectors=0\nMyOwnSetting=1\n"
+        _orph_ini.write_text(_user, encoding="utf-8", newline="")
+        _r3 = ue.strip_orphan(_orph_win64)
+        r.check("UE 配置兜底：用户自己的配置绝不动", not _r3.changed, _r3.detail)
+        r.check("UE 配置兜底：用户配置保持原样",
+                _orph_ini.read_text(encoding="utf-8") == _user)
+
     finally:
         # 恢复用户真实状态
         try:

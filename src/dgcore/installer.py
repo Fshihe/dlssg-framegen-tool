@@ -1301,7 +1301,23 @@ def uninstall_any(target_dir: str | Path, force: bool = False):
         from . import optiscaler
 
         return optiscaler.uninstall_installed(target_dir, force=force)
-    return uninstall(target_dir, force=force)
+
+    res = uninstall(target_dir, force=force)
+
+    # 补一刀：OptiScaler 引擎会往游戏 Engine.ini 写一行配置。如果记录丢了、
+    # 或者用户是从 DLSSG 引擎那边点的卸载，那一行没人负责清理，
+    # 就会永远留在用户的游戏配置里。这里按标记行兜底清掉。
+    try:
+        from . import optiscaler, ueconfig
+
+        if not optiscaler.detect_ours(target_dir):
+            r = ueconfig.strip_orphan(target_dir)
+            if r.changed:
+                res.message += f"；{r.detail}"
+    except Exception:
+        pass
+
+    return res
 
 
 def verify_any(target_dir: str | Path) -> VerifyResult:

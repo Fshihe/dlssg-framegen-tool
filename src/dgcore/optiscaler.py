@@ -1490,7 +1490,16 @@ def uninstall_installed(target_dir: str | Path, force: bool = False) -> OptiResu
         # 记录丢了：按内容认一遍，能认出来也照样能干净卸载
         detected = detect_ours(target_dir)
         if not detected:
-            return OptiResult(False, "没有该目录的 OptiScaler 安装记录，未做任何改动")
+            # 文件也没了 —— 但游戏配置里可能还留着我们加的那一行。
+            # 状态文件被清理是真实会发生的，不能因此把改动永远留在用户配置里。
+            from . import ueconfig
+
+            orphan = ueconfig.strip_orphan(target_dir)
+            return OptiResult(
+                orphan.ok,
+                ("没有该目录的 OptiScaler 安装记录，未做任何改动"
+                 + (f"；{orphan.detail}" if orphan.changed else "")),
+            )
         rec = {
             "engine": ENGINE_OPTISCALER,
             "files": [{"name": n, "sha256": h} for n, h in detected.items()],
@@ -1502,12 +1511,17 @@ def uninstall_installed(target_dir: str | Path, force: bool = False) -> OptiResu
     if res.success:
         # 撤销对游戏 Engine.ini 的改动
         ue = rec.get("ue_config") or {}
-        if ue.get("changed"):
-            from . import ueconfig
+        from . import ueconfig
 
+        if ue.get("changed"):
             edit = ueconfig.CvarEdit.from_dict(ue.get("edit"))
             r = ueconfig.restore_dilate(target_dir, edit, created=bool(ue.get("created")))
             res.message += f"；{r.detail}" if r.ok else f"；游戏配置回退失败：{r.detail}"
+        else:
+            # 记录里没有配置改动信息（老记录或记录不全）→ 按标记行兜底清理
+            r = ueconfig.strip_orphan(target_dir)
+            if r.changed:
+                res.message += f"；{r.detail}"
 
         gone = clean_runtime_leftovers(target_dir)
         if gone:

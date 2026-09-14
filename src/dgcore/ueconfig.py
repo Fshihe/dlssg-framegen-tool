@@ -439,6 +439,82 @@ def ensure_dilate_off(target_dir: str | Path) -> UeConfigResult:
         return UeConfigResult(False, path, False, f"{type(exc).__name__}: {exc}")
 
 
+def has_our_mark(text: str) -> bool:
+    """文件里有没有我们留的标记行。
+
+    用来在没有安装记录时判断"这一行是不是我们加的"。
+    用户自己手写同样的键不会带这行注释，所以不会误伤。
+    """
+    return MARK_LINE in text
+
+
+def _section_key_count(text: str) -> int:
+    """[SystemSettings] 节里有多少个有效键（不含注释和空行）。"""
+    cur = ""
+    n = 0
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            cur = s[1:-1].strip()
+            continue
+        if cur.lower() != CVAR_SECTION.lower():
+            continue
+        if s and not s.startswith(";") and "=" in s:
+            n += 1
+    return n
+
+
+def strip_orphan(target_dir: str | Path) -> UeConfigResult:
+    """没有安装记录时，也能清掉我们留下的 cvar。
+
+    为什么需要它：状态文件一旦被清理（实测发生过），卸载就再也找不到
+    "当初改了什么"，于是 Engine.ini 里那一行会永远留在用户的游戏配置里。
+
+    两级判据：
+
+      1. 有我们写的标记行 → 确定是我们加的，直接清
+      2. 没有标记行，但 [SystemSettings] 节里**只有这一个键** → 几乎可以
+         肯定是本工具建的节，清掉
+
+    第 2 条为什么必要：**虚幻引擎退出时会重写 Engine.ini 并丢掉注释行**，
+    实测黑神话就是这么把标记行弄没的。只认标记行等于失效。
+
+    第 2 条为什么不误伤：用户自己写的配置不会恰好是一个只含这一把键的空节 ——
+    除非他照着 OptiScaler 文档手改。那种情况下删掉也无害（值本来就是我们
+    要的那个），而且卸载信息里会写明改了什么。
+    """
+    path, how = find_engine_ini(target_dir)
+    if path is None or not path.is_file():
+        return UeConfigResult(True, path, False, "Engine.ini 不存在")
+
+    text = read_text(path)
+    marked = has_our_mark(text)
+    if not marked:
+        if not has_cvar(text):
+            return UeConfigResult(True, path, False, "没有本工具留下的配置项")
+        if _section_key_count(text) != 1:
+            # 这一节里还有别的键 —— 大概率是用户自己的配置，不要动
+            return UeConfigResult(True, path, False, "该节还有其他配置项，未做改动")
+
+    # 有记录时按记录还原；没记录就按"当前没有这个节"来清
+    edit = CvarEdit(section_existed=False, prev_value=None, eol=_eol(text),
+                    trailing_eol=text.endswith(_eol(text)) if text else False)
+    new, changed = strip_cvar(text, edit)
+    if not changed:
+        return UeConfigResult(True, path, False, "无可清理内容")
+
+    try:
+        tmp = path.with_name(path.name + ".dlssgtool.tmp")
+        tmp.write_text(new, encoding="utf-8", newline="")
+        os.replace(tmp, path)
+        journal("ueconfig_orphan_stripped", path=str(path), marked=marked)
+        how_found = "按标记行" if marked else "按空节判定"
+        return UeConfigResult(True, path, True,
+                              f"已清理本工具残留的配置项（{how_found}）：{path}")
+    except Exception as exc:
+        return UeConfigResult(False, path, False, f"{type(exc).__name__}: {exc}")
+
+
 def restore_dilate(target_dir: str | Path, edit: CvarEdit | None = None,
                    created: bool = False) -> UeConfigResult:
     """撤销我们对 Engine.ini 的改动。
