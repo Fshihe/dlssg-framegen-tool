@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import DEFAULT_PROXY, INI_NAME, PROXY_ENTRIES, UPSTREAM_VERSION
 from . import proc
+from . import profiles
 from . import winenv
 from .gpu import VERDICT_OK, VERDICT_NOT_NEEDED
 from .paths import (
@@ -36,6 +37,40 @@ from .payload_manifest import MANIFEST, PAYLOAD_VERSION
 
 # 代理入口优先级：version.dll 是上游默认，其余是备用
 PROXY_ORDER = ["version.dll", "winmm.dll", "dinput8.dll", "winhttp.dll", "dxgi.dll"]
+
+# 倍率上限选项（INI 里的 MaxGeneratedFrames 是"最多额外生成几帧"）
+#   3 = 4X，2 = 3X，1 = 2X（0.2.4）
+#   5 = 6X，4 = 5X，3 = 4X，2 = 3X，1 = 2X（0.3.0）
+#
+# 注意：这只是**上限**，实际用几倍由游戏决定。游戏只给开关不给选择时，
+# 写多少效果都一样 —— 这是评论区里最容易误解的一点。
+FRAME_OPTIONS = [
+    "6X（上限，仅 0.3.0）",
+    "4X（上限，推荐）",
+    "3X",
+    "2X",
+]
+FRAME_VALUE = {
+    "6X（上限，仅 0.3.0）": 5,
+    "5X（仅 0.3.0）": 4,
+    "4X（上限，推荐）": 3,
+    "3X": 2,
+    "2X": 1,
+}
+
+# 按 profile 过滤可选项（0.2.4 最高 4X，0.3.0 才到 6X）
+FRAME_VALUES_BY_MAX = {
+    4: ["4X（上限，推荐）", "3X", "2X"],
+    6: ["6X（上限，仅 0.3.0）", "5X（仅 0.3.0）", "4X（上限，推荐）", "3X", "2X"],
+}
+
+
+def frame_options_for(profile) -> list[str]:
+    return list(FRAME_VALUES_BY_MAX.get(profile.max_multiplier, FRAME_VALUES_BY_MAX[4]))
+
+
+def frame_option_to_value(text: str, fallback: int = 3) -> int:
+    return FRAME_VALUE.get(text, fallback)
 
 TMP_SUFFIX = ".dlssgtool.tmp"
 
@@ -101,25 +136,50 @@ class PayloadFile:
     message: str = ""
 
 
-def payload_dir() -> Path:
-    """payload 目录：优先用 exe 旁边的（便于用户自行更新），否则用内置解包目录。"""
-    side = exe_dir() / "payload"
-    if side.is_dir() and any(side.glob("*.dll")):
+def payload_dir(version: str | None = None) -> Path:
+    """payload 目录。
+
+    结构：payload/<版本>/xxx.dll
+    优先用 exe 旁边的（便于用户自行更新），否则用内置解包目录。
+    """
+    ver = version or profiles.DEFAULT_VERSION
+
+    def pick(base: Path) -> Path | None:
+        d = base / "payload" / ver
+        if d.is_dir() and any(d.glob("*.dll")):
+            return d
+        # 兼容旧的扁平结构（payload/xxx.dll）
+        flat = base / "payload"
+        if flat.is_dir() and any(flat.glob("*.dll")):
+            return flat
+        return None
+
+    side = pick(exe_dir())
+    if side is not None:
         return side
-    return resource_root() / "payload"
+    got = pick(resource_root())
+    return got if got is not None else (resource_root() / "payload" / ver)
 
 
-def resolve_payload(proxy: str) -> PayloadFile:
-    """取出指定代理 DLL 并做完整性校验。"""
+def resolve_payload(proxy: str, version: str | None = None, profile=None) -> PayloadFile:
+    """取出指定代理 DLL 并做完整性校验。
+
+    version 缺省 = 当前默认 profile；20 系会自动走 0.2.4。
+    """
+    prof = profile or profiles.get(version or profiles.DEFAULT_VERSION)
     name = proxy if proxy.lower().endswith(".dll") else proxy + ".dll"
-    path = payload_dir() / name
-    expect = MANIFEST.get(name)
+    path = payload_dir(prof.version) / name
+    expect = prof.manifest.get(name)
+
     if not path.is_file():
         return PayloadFile(name, path, "", 0, False, f"找不到内置 payload：{path}")
     size = path.stat().st_size
     digest = sha256_file(path)
     if expect is None:
-        return PayloadFile(name, path, digest, size, False, "该文件不在完整性基线内")
+        return PayloadFile(
+            name, path, digest, size, False,
+            f"{name} 不在 {prof.version} 的完整性基线内",
+        )
     exp_hash, exp_size = expect
     if size != exp_size:
         return PayloadFile(name, path, digest, size, False, f"体积不符：{size} != {exp_size}")
@@ -131,12 +191,26 @@ def resolve_payload(proxy: str) -> PayloadFile:
     return PayloadFile(name, path, digest, size, True, "完整性校验通过")
 
 
-def available_payloads() -> dict[str, bool]:
-    return {p: resolve_payload(p).ok for p in PROXY_ORDER}
+def available_payloads(version: str | None = None) -> dict[str, bool]:
+    prof = profiles.get(version or profiles.DEFAULT_VERSION)
+    return {p: resolve_payload(p, profile=prof).ok for p in prof.proxy_names}
+
+
+def profile_available(version: str) -> tuple[bool, str]:
+    """某个 profile 的 payload 是否齐全可用。"""
+    prof = profiles.get(version)
+    missing = []
+    for name in prof.proxy_names:
+        r = resolve_payload(name, profile=prof)
+        if not r.ok:
+            missing.append(f"{name}({r.message})")
+    if missing:
+        return False, "；".join(missing)
+    return True, f"{len(prof.proxy_names)} 个文件齐全"
 
 
 # --------------------------------------------------------------------------
-# INI 生成
+# INI 生成 —— 委托给 profiles（版本差异只在那里处理）
 # --------------------------------------------------------------------------
 
 def build_ini(
@@ -144,35 +218,21 @@ def build_ini(
     hardware_bilinear: int = 0,
     max_generated_frames: int = 3,
     log_level: int = 1,
+    version: str | None = None,
 ) -> str:
-    """按上游 docs/NATIVE_INI.md 生成配置。
+    """按 profile 生成配置。
 
-    SM75 不支持近似采样，强制写 0。
+    version 缺省时按 router 自动选：SM86 → 0.3.0，SM75 → 0.2.4。
+    hardware_bilinear 只对 0.2.4 有意义（0.3.0 没有这个开关）。
     """
-    router = (router or "SM86").upper()
-    if router not in ("SM86", "SM75"):
-        router = "SM86"
-    if router == "SM75":
-        hardware_bilinear = 0
-    hardware_bilinear = 1 if int(hardware_bilinear) else 0
-    max_generated_frames = max(1, min(3, int(max_generated_frames)))
-    log_level = max(0, min(3, int(log_level)))
-
-    return (
-        f"; 由 DLSSG 一键开启工具生成 — 上游 {UPSTREAM_VERSION}\n"
-        f"; 修改后需要重启游戏才会生效。\n"
-        f"; Router={router} 对应 {'RTX 30 系列 (Ampere)' if router == 'SM86' else 'RTX 20 系列 (Turing)'}\n"
-        "\n"
-        "[Compatibility]\n"
-        f"Router={router}\n"
-        "KernelImage=PTX\n"
-        f"HardwareBilinear={hardware_bilinear}\n"
-        "\n"
-        "[FrameGeneration]\n"
-        f"MaxGeneratedFrames={max_generated_frames}\n"
-        "\n"
-        "[Logging]\n"
-        f"Level={log_level}\n"
+    prof = profiles.for_router(router, prefer=version)
+    frames = max(1, min(prof.max_frames, int(max_generated_frames)))
+    return profiles.build_ini(
+        prof,
+        router=router,
+        max_generated_frames=frames,
+        log_level=log_level,
+        hardware_bilinear=hardware_bilinear,
     )
 
 
@@ -290,10 +350,23 @@ def preflight(
     game_name: str = "",
     running_names: list[str] | None = None,
     anticheat=None,
+    version: str | None = None,
 ) -> Preflight:
-    """安装前把所有风险点查一遍，一条都不放过。"""
+    """安装前把所有风险点查一遍，一条都不让过。"""
     pf = Preflight()
     target_dir = Path(target_dir)
+    prof = profiles.for_router(router, prefer=version)
+
+    # 0. profile 自检：20 系只能用 0.2.4（0.3.0 删了 SM75 内核）
+    if (router or "").upper() == "SM75" and not prof.supports_sm75:
+        pf.add(
+            "error",
+            "版本与显卡不匹配",
+            f"{prof.version} 不支持 RTX 20 系列（SM75）。\n"
+            "这属于程序内部错误，请反馈。",
+        )
+    else:
+        pf.add("ok", f"使用上游 {prof.version}", prof.explanation)
 
     # 1. 目录
     if not target_dir.is_dir():
@@ -327,6 +400,12 @@ def preflight(
         pf.add("ok", "计算路由 SM86", "对应 RTX 30 系列 (Ampere)")
     elif router == "SM75":
         pf.add("ok", "计算路由 SM75", "对应 RTX 20 系列 (Turing)")
+        pf.add(
+            "warn",
+            "20 系是实验性支持",
+            "上游从 0.3.0 起已移除 SM75 内核，本工具自动改用 0.2.4（最后一个支持 20 系的版本）。\n"
+            "可能出现画面闪烁、拖影或闪退，出问题可随时卸载还原。",
+        )
     else:
         pf.add("error", "计算路由无法确定", f"检测到的 Router = {router!r}")
 
@@ -419,15 +498,19 @@ def preflight(
     if ini.exists() and not ours:
         pf.add("warn", "已存在 dlssg_sm86.ini", "会先备份再覆盖（可能是你手改过的配置）")
 
-    # 9. payload 完整性
-    pl = resolve_payload(dll_name)
+    # 9. payload 完整性（按当前 profile 校验）
+    pl = resolve_payload(dll_name, profile=prof)
     if pl.ok:
-        pf.add("ok", "内置 DLL 完整性校验通过", f"{dll_name}  SHA256 {pl.sha256[:16]}…")
+        pf.add(
+            "ok",
+            "内置 DLL 完整性校验通过",
+            f"{prof.version}/{dll_name}  SHA256 {pl.sha256[:16]}…",
+        )
     else:
         pf.add("error", "内置 DLL 校验失败", pl.message)
 
     # 10. 目录里是否有别的代理冲突（同一游戏装多个代理会互相打架）
-    others = [p for p in PROXY_ORDER if p != dll_name and (target_dir / p).exists()]
+    others = [p for p in prof.proxy_names if p != dll_name and (target_dir / p).exists()]
     if others:
         pf.add(
             "warn",
@@ -461,25 +544,34 @@ class InstallPlan:
     ini_text: str = ""
     game_name: str = ""
     cleanup_proxy: str = ""
+    version: str = ""          # 使用的上游 profile 版本
 
     @property
     def writes(self) -> list[PlanItem]:
         return [i for i in self.items if i.action in (ACT_COPY, ACT_REMOVE)]
 
 
-def auto_pick_proxy(target_dir: Path) -> tuple[str, str]:
-    """挑一个没被占用的代理入口。返回 (proxy, 说明)。"""
+def auto_pick_proxy(target_dir: Path, profile=None) -> tuple[str, str]:
+    """挑一个没被占用的代理入口。返回 (proxy, 说明)。
+
+    只从当前 profile 支持的入口里挑 —— 0.3.0 没有 winhttp，0.2.4 没有 dbghelp。
+    """
     target_dir = Path(target_dir)
+    prof = profile or profiles.get(profiles.DEFAULT_VERSION)
+
     prev = find_install(target_dir)
-    if prev and prev.get("proxy"):
+    if prev and prev.get("proxy") and prev["proxy"] in prof.proxy_names:
         # 继续用之前那个，避免留下孤儿文件
         return prev["proxy"], f"沿用上次安装的入口 {prev['proxy']}"
-    for p in PROXY_ORDER:
+
+    for p in prof.proxy_names:
         if not (target_dir / p).exists():
-            if p == DEFAULT_PROXY:
-                return p, "使用上游默认入口 version.dll"
-            return p, f"version.dll 已被占用，改用备用入口 {p}"
-    return DEFAULT_PROXY, "所有入口名都被占用，将覆盖默认入口 version.dll（会先备份）"
+            entry = prof.proxy(p)
+            if p == prof.default_proxy:
+                return p, f"使用上游默认入口 {p}"
+            extra = f"（{entry.note}）" if entry and entry.note else ""
+            return p, f"{prof.default_proxy} 已被占用，改用备用入口 {p}{extra}"
+    return prof.default_proxy, f"所有入口名都被占用，将覆盖 {prof.default_proxy}（会先备份）"
 
 
 def make_plan(
@@ -491,10 +583,19 @@ def make_plan(
     hardware_bilinear: int = 0,
     max_generated_frames: int = 3,
     log_level: int = 1,
+    version: str | None = None,
 ) -> InstallPlan:
     target_dir = Path(target_dir)
+    prof = profiles.for_router(router, prefer=version)
     dll_name = proxy if proxy.lower().endswith(".dll") else proxy + ".dll"
-    ini_text = build_ini(router, hardware_bilinear, max_generated_frames, log_level)
+
+    # 用户指定的入口不在当前 profile 里 → 回退到该 profile 的默认入口
+    if dll_name not in prof.proxy_names:
+        dll_name = prof.default_proxy
+
+    ini_text = build_ini(
+        router, hardware_bilinear, max_generated_frames, log_level, version=prof.version
+    )
     plan = InstallPlan(
         target_dir=target_dir,
         exe_path=exe_path,
@@ -503,6 +604,7 @@ def make_plan(
         ini_text=ini_text,
         game_name=game_name,
     )
+    plan.version = prof.version
 
     # 若之前用的是别的代理入口，顺手清理掉旧的那个（会先备份）
     prev = find_install(target_dir)
@@ -514,7 +616,7 @@ def make_plan(
                 PlanItem(ACT_REMOVE, prev["proxy"], None, old, "移除本工具上次安装的旧入口")
             )
 
-    pl = resolve_payload(dll_name)
+    pl = resolve_payload(dll_name, profile=prof)
     dst_dll = target_dir / dll_name
     if dst_dll.exists() and pl.ok and same_content(dst_dll, pl.path):
         plan.items.append(PlanItem(ACT_SKIP, dll_name, pl.path, dst_dll, "内容已一致，无需写入"))
@@ -647,10 +749,17 @@ def execute_plan(plan: InstallPlan, dry_run: bool = False) -> InstallResult:
             existed = dst.exists()
 
             # 写入前再次复核 payload 完整性（防止计划生成后源文件被换掉）
+            # 注意：必须按 plan 对应的 profile 取基线 —— 0.2.4 和 0.3.0 的
+            # DLL 哈希不同，用错基线会把正常的安装判成"被篡改"。
             if item.src is not None:
-                base = MANIFEST.get(item.name)
+                _prof = profiles.get(plan.version) if plan.version else profiles.get(
+                    profiles.DEFAULT_VERSION
+                )
+                base = _prof.manifest.get(item.name)
                 if base is None:
-                    raise RuntimeError(f"{item.name} 不在完整性基线内，拒绝安装")
+                    raise RuntimeError(
+                        f"{item.name} 不在 {_prof.version} 的完整性基线内，拒绝安装"
+                    )
                 got_hash = sha256_file(item.src)
                 if got_hash != base[0]:
                     raise RuntimeError(
@@ -708,7 +817,7 @@ def execute_plan(plan: InstallPlan, dry_run: bool = False) -> InstallResult:
             ],
             "originals": originals,
             "backup_dir": str(backup_dir),
-            "payload_version": PAYLOAD_VERSION,
+            "payload_version": plan.version or PAYLOAD_VERSION,
             "installed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         record_install(rec)
@@ -820,8 +929,18 @@ def verify(target_dir: str | Path) -> VerifyResult:
             out.append(Check("error", f"{f['name']} 哈希不符", f"当前 {digest[:16]}… 期望 {exp[:16]}…"))
             healthy = False
         elif f["name"].lower().endswith(".dll"):
-            base = MANIFEST.get(f["name"])
-            if base and digest != base[0]:
+            # 用记录里写的版本对基线；记录没有就查所有版本
+            _ver = (rec or {}).get("payload_version", "")
+            base = profiles.get(_ver).manifest.get(f["name"]) if _ver else None
+            if base is None:
+                from .payload_manifest import ALL_HASHES
+
+                known = digest in ALL_HASHES
+                if known:
+                    out.append(Check("ok", f"{f['name']} 完好（原始文件）", f"SHA256 {digest[:16]}…"))
+                else:
+                    out.append(Check("warn", f"{f['name']} 已非原始文件", "可能被更新或被其他程序替换"))
+            elif digest != base[0]:
                 out.append(Check("warn", f"{f['name']} 已非原始文件", "可能被更新或被其他程序替换"))
             else:
                 out.append(Check("ok", f"{f['name']} 完好", f"SHA256 {digest[:16]}…"))
@@ -944,6 +1063,27 @@ def uninstall(target_dir: str | Path, force: bool = False) -> UninstallResult:
         if not b.is_file():
             res.message += f"原始备份已丢失：{name}；"
             continue
+
+        # 防护：如果这份"原始备份"本身就是我们工具生成的产物，
+        # 还原它等于把我们的文件又放回去 —— 那不是"恢复原状"。
+        # 这种情况出现在：用户反复安装/卸载，或上一次卸载没清干净。
+        if name == INI_NAME:
+            try:
+                if "由 DLSSG 一键开启工具生成" in b.read_text("utf-8", "ignore"):
+                    journal("skip_restore_own_ini", path=str(b))
+                    log(f"备份的 {name} 是本工具生成的，不再还原", "warn")
+                    continue
+            except OSError:
+                pass
+        else:
+            # 备份的是不是我们自己某个版本的 DLL —— 查全部版本的哈希
+            from .payload_manifest import ALL_HASHES
+
+            if try_hash(b) in ALL_HASHES:
+                journal("skip_restore_own_dll", path=str(b))
+                log(f"备份的 {name} 是本工具的 DLL，不再还原", "warn")
+                continue
+
         dst = target_dir / name
         try:
             shutil.copy2(b, dst)

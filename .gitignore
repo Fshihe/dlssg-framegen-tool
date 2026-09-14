@@ -6,6 +6,7 @@ build/
 
 # 上游代理 DLL —— 不入库，用 tools/fetch_payload.py 从上游获取
 # （这样仓库本身不再分发这些二进制，来源也更清楚）
+payload/**/*.dll
 payload/*.dll
 
 # Python

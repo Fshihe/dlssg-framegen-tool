@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import APP_NAME, INI_NAME, UPSTREAM_REPO, UPSTREAM_VERSION, VERSION
 from . import anticheat as ac
-from . import games, gpu, installer, pe, report
+from . import games, gpu, installer, pe, profiles, report
 from .paths import logs_root, reports_root
 
 
@@ -197,13 +197,17 @@ def cmd_plan(args) -> int:
     env = gpu.detect()
     root, exe, target = resolve_target(args.path, args.router)
     router = args.router if args.router != "auto" else env.router
-    proxy, why = (args.proxy, "手动指定") if args.proxy else installer.auto_pick_proxy(Path(target))
+    prof = profiles.for_router(router, prefer=getattr(args, "upstream", None))
+    proxy, why = ((args.proxy, "手动指定") if args.proxy
+                  else installer.auto_pick_proxy(Path(target), profile=prof))
     plan = installer.make_plan(
         Path(target), exe, proxy, router,
         game_name=root.name, hardware_bilinear=args.bilinear,
         max_generated_frames=args.frames, log_level=args.log_level,
+        version=prof.version,
     )
     _hdr("将要执行的改动（预演，不会真的写入）")
+    out(f"上游版本：{plan.version}（{prof.explanation}）")
     out(f"入口选择：{why}")
     out("")
     for it in plan.items:
@@ -225,18 +229,26 @@ def cmd_install(args) -> int:
     env = gpu.detect()
     root, exe, target = resolve_target(args.path, args.router)
     router = args.router if args.router != "auto" else env.router
-    proxy, why = (args.proxy, "手动指定") if args.proxy else installer.auto_pick_proxy(Path(target))
+    prof = profiles.for_router(router, prefer=getattr(args, "upstream", None))
+    proxy, why = ((args.proxy, "手动指定") if args.proxy
+                  else installer.auto_pick_proxy(Path(target), profile=prof))
     tdir = Path(target)
 
     _hdr("一键安装 DLSS 帧生成支持")
     out(f"游戏      : {root.name}")
     out(f"游戏目录  : {tdir}")
     out(f"主程序    : {exe or '(未找到)'}")
+    out(f"上游版本  : {prof.version}（{prof.explanation}）")
     out(f"代理入口  : {proxy}（{why}）")
     out(f"计算路由  : {router}")
+    if router == "SM75":
+        out("")
+        out("⚠ 20 系为实验性支持：上游 0.3.0 已移除 SM75 内核，本工具自动改用 0.2.4。")
+        out("  可能出现画面闪烁、拖影或闪退；出问题可随时卸载还原。")
 
     acr = ac.scan(root)
-    pf = installer.preflight(tdir, exe, proxy, router, env=env, anticheat=acr)
+    pf = installer.preflight(tdir, exe, proxy, router, env=env, anticheat=acr,
+                             version=prof.version)
     out("")
     _print_checks(pf.checks)
 
@@ -251,7 +263,7 @@ def cmd_install(args) -> int:
     plan = installer.make_plan(
         tdir, exe, proxy, router, game_name=root.name,
         hardware_bilinear=args.bilinear, max_generated_frames=args.frames,
-        log_level=args.log_level,
+        log_level=args.log_level, version=prof.version,
     )
     out("")
     out("改动清单：")
@@ -489,6 +501,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--proxy", help="代理入口 DLL 名（默认自动挑选）")
         sp.add_argument("--router", default="auto", choices=["auto", "SM86", "SM75"],
                         help="计算路由（默认自动按显卡判断）")
+        sp.add_argument("--upstream", choices=list(profiles.PROFILES),
+                        help="强制指定上游版本（默认按路由自动选：SM86→0.3.0，SM75→0.2.4）")
 
     sp = sub.add_parser("detect", help="检测显卡与系统环境")
     sp.add_argument("--json", action="store_true")

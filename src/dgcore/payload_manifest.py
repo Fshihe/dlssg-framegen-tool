@@ -1,23 +1,43 @@
-"""随程序发布的 payload 完整性基线。
+"""payload 完整性基线 —— 由 profiles 模块统一提供。
 
-这些哈希在构建时对 payload/ 里的文件实算得出。
-安装前会逐个核对，任何不匹配都会中止安装 —— 防止损坏或被篡改的
-DLL 被写进游戏目录。
+历史上这里是硬编码的版本字典，现在改成薄封装：
+真正的版本定义在 dgcore/profiles.py，那里同时承载 INI 结构等版本差异。
 
-version.dll = c844646d… 与上游 README 公布的 0.2.4 已签名 DLL 哈希一致。
+保留这个模块是为了不破坏既有调用方（installer / selftest / build）。
 """
 
 from __future__ import annotations
 
-PAYLOAD_VERSION = "0.2.4"
+from .profiles import (
+    DEFAULT_VERSION,
+    FALLBACK_VERSION,
+    PROFILE_024,
+    PROFILES,
+    get,
+)
 
-# 文件名 -> (sha256, 字节数)
-MANIFEST: dict[str, tuple[str, int]] = {
-    "version.dll": ("c844646d835a7b88ed1382eea80403d38b433f8ac09cf92581c73698c44ae7c2", 15667520),
-    "winmm.dll": ("1004dd4ee0edbe4e1af4c8c7b30d4786bea0f5e7c0412566996b4c2543ae7e36", 15678272),
-    "dinput8.dll": ("ef3c3d49c5b5c8a17289c24da9b22885570793d72f3db628fa500f9efdb20489", 15666496),
-    "winhttp.dll": ("1619839e4d1b6145ce9a587ba807f42e64f2b0984af9e81700d42ccf46ff7253", 15674176),
-    "dxgi.dll": ("8d29eddbd7f1c3e272d07f94ab8812a80ef5b7aeb73923320bf9a432ddcf74c0", 15668032),
-}
+# 当前默认 profile（新用户走这个）
+PAYLOAD_VERSION = DEFAULT_VERSION
 
-__all__ = ["MANIFEST", "PAYLOAD_VERSION"]
+# 兼容旧接口：默认 profile 的清单
+MANIFEST: dict[str, tuple[str, int]] = dict(PROFILES[DEFAULT_VERSION].manifest)
+
+# 0.2.4 的清单（20 系用户会用到，也是历史回归测试的基准）
+MANIFEST_024: dict[str, tuple[str, int]] = dict(PROFILE_024.manifest)
+
+# 全部版本的 哈希 -> 文件名，用于「这个文件是不是我们的」这类按哈希识别的场景
+ALL_HASHES: dict[str, str] = {}
+for _p in PROFILES.values():
+    for _name, (_h, _size) in _p.manifest.items():
+        ALL_HASHES.setdefault(_h, _name)
+
+__all__ = [
+    "MANIFEST",
+    "MANIFEST_024",
+    "ALL_HASHES",
+    "PAYLOAD_VERSION",
+    "DEFAULT_VERSION",
+    "FALLBACK_VERSION",
+    "PROFILES",
+    "get",
+]

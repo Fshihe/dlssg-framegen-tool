@@ -1,8 +1,8 @@
 """一键构建：校验 payload → 生成图标 → PyInstaller 打包 → 输出哈希。
 
 用法：
-    python build.py              # 完整构建（含 5 个代理 DLL，离线自包含）
-    python build.py --slim       # 精简版：只内置 version.dll（体积小，备用入口需联网下载）
+    python build.py              # 完整构建（内置两个上游版本的代理 DLL，离线自包含）
+    python build.py --slim       # 精简版：只内置 0.3.0 的 version.dll
     python build.py --no-verify  # 跳过构建后的自检
 """
 
@@ -23,7 +23,7 @@ DIST = ROOT / "dist"
 WORK = ROOT / "work"
 
 sys.path.insert(0, str(SRC))
-from dgcore.payload_manifest import MANIFEST  # noqa: E402
+from dgcore import profiles  # noqa: E402
 
 # 产物名一律用 ASCII —— 中文名在 GitHub Release、部分解压工具和国外网盘上会乱码
 APP_BASENAME = "dlssg-cn"
@@ -46,28 +46,43 @@ def step(msg: str) -> None:
 
 def verify_payload(slim: bool) -> None:
     step("① 校验 payload 完整性")
-    names = ["version.dll"] if slim else list(MANIFEST)
+    if slim:
+        # 精简版只带 0.3.0 的 version.dll
+        plan = [("0.3.0", "version.dll")]
+    else:
+        plan = [
+            (v, n)
+            for v in profiles.all_versions()
+            for n in profiles.get(v).proxy_names
+        ]
+
     bad = []
-    for name in names:
-        p = PAYLOAD / name
+    for ver, name in plan:
+        prof = profiles.get(ver)
+        p = PAYLOAD / ver / name
+        exp = prof.manifest.get(name)
         if not p.is_file():
-            bad.append(f"{name}: 文件缺失")
+            bad.append(f"{ver}/{name}: 文件缺失")
             continue
-        exp_hash, exp_size = MANIFEST[name]
+        exp_hash, exp_size = exp
         if p.stat().st_size != exp_size:
-            bad.append(f"{name}: 体积 {p.stat().st_size} != {exp_size}")
+            bad.append(f"{ver}/{name}: 体积 {p.stat().st_size} != {exp_size}")
             continue
         got = sha256(p)
         ok = got == exp_hash
-        print(f"  {'OK  ' if ok else 'FAIL'} {name:14} {got[:20]}…  {p.stat().st_size:,} bytes")
+        print(f"  {'OK  ' if ok else 'FAIL'} {ver}/{name:14} {got[:20]}…  {p.stat().st_size:,} bytes")
         if not ok:
-            bad.append(f"{name}: SHA256 不符")
+            bad.append(f"{ver}/{name}: SHA256 不符")
+
     if bad:
         print("\n  payload 校验失败：")
         for b in bad:
             print(f"    - {b}")
+        print("\n  提示：先跑 python tools\\fetch_payload.py 获取缺失的 DLL")
         raise SystemExit(1)
-    print(f"\n  全部 {len(names)} 个文件校验通过（version.dll 与上游公布哈希一致）")
+
+    n_vers = len({v for v, _ in plan})
+    print(f"\n  全部 {len(plan)} 个文件校验通过（覆盖 {n_vers} 个上游版本）")
 
 
 def make_icon() -> Path:
@@ -87,10 +102,25 @@ def pyinstaller(slim: bool) -> Path:
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
-    names = ["version.dll"] if slim else list(MANIFEST)
-    for name in names:
-        shutil.copy2(PAYLOAD / name, stage / name)
-    print(f"  内置 payload：{len(names)} 个文件，共 {sum((stage/n).stat().st_size for n in names):,} bytes")
+
+    # 按 payload/<版本>/<文件> 的目录结构打包进 exe
+    if slim:
+        plan = [("0.3.0", "version.dll")]
+    else:
+        plan = [
+            (v, n)
+            for v in profiles.all_versions()
+            for n in profiles.get(v).proxy_names
+        ]
+    total = 0
+    for ver, name in plan:
+        dst_dir = stage / ver
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        src = PAYLOAD / ver / name
+        shutil.copy2(src, dst_dir / name)
+        total += src.stat().st_size
+    n_vers = len({v for v, _ in plan})
+    print(f"  内置 payload：{len(plan)} 个文件 / {n_vers} 个版本，共 {total:,} bytes")
 
     cmd = [
         sys.executable, "-m", "PyInstaller",

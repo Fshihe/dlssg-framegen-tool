@@ -17,7 +17,10 @@ from pathlib import Path
 
 from . import INI_NAME
 from . import anticheat as ac
+from . import capability
 from . import games, gpu, installer, pe, proc
+from . import gfxapi
+from . import profiles
 from .installer import MANIFEST
 
 # 外来 Mod 的占位内容（用来验证"备份-还原"链路）
@@ -43,17 +46,149 @@ class Runner:
         return self.check(name, got == want, detail or f"got={got!r} want={want!r}")
 
 
+def _write_tmp(base: Path, name: str, text: str) -> Path:
+    p = base / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
 def _make_fake_game(root: Path, exe_name: str = "FakeGame-Win64-Shipping.exe", foreign: bool = True):
     """造一个假的游戏目录。"""
     exe_dir = root / "Game" / "Binaries" / "Win64"
     exe_dir.mkdir(parents=True, exist_ok=True)
-    # 造一个带 d3d12 导入特征的假 EXE：直接复制系统里真导入 d3d12 的 dll 不行，
-    # 用一段真实 PE（复制自身 python.exe 不行）——改为构造最小 PE 太脆弱，
-    # 这里直接复制一个已知导入 d3d12.dll 的系统组件；找不到就跳过 D3D12 相关断言。
-    (exe_dir / exe_name).write_bytes(b"MZ" + b"\x00" * 2048)
+    (exe_dir / exe_name).write_bytes(synth_pe())
     if foreign:
         (exe_dir / "version.dll").write_bytes(FOREIGN_DLL)
     return exe_dir
+
+
+# --------------------------------------------------------------------------
+# 合成 PE —— 自检**不能**依赖任何系统文件
+#
+# 早期版本会去复制 System32\notepad.exe 当测试素材，结果在 Windows 11 上
+# 直接报「系统找不到指定文件」：Win11 已经把 notepad 移出 System32 改成
+# Store 应用了。一个用来建立信任的自检功能自己报错，比没有还糟。
+#
+# 所以改成自己拼一个语法合法的 64 位 PE：只含一个 .text 段和一个导入表，
+# 内容完全可控、任何 Windows 上行为一致。
+# --------------------------------------------------------------------------
+
+def synth_pe(imports: tuple[str, ...] = ("KERNEL32.dll", "d3d12.dll", "dxgi.dll")) -> bytes:
+    """生成一个最小但结构合法的 x64 PE 文件。
+
+    只做到 PE 解析器需要的程度：DOS 头、COFF 头、可选头、一个 .text 段、
+    以及一个真实的导入表（这样导入表解析路径能被真正测到）。
+    """
+    import struct
+
+    SECT_RVA = 0x1000
+    SECT_RAW = 0x400
+    OPT_SIZE = 240  # PE32+ 可选头大小
+
+    # ---- 构造 .text 段内容 ----
+    # 布局： [导入描述符 20*N + 全零] [DLL 名字符串] [INT/IAT 表] [函数名]
+    n = len(imports)
+    desc_size = 20 * (n + 1)
+
+    name_off = desc_size
+    name_offsets: dict[str, int] = {}
+    blob = bytearray(b"\x00" * name_off)
+    for nm in imports:
+        name_offsets[nm] = len(blob)
+        blob += nm.encode("ascii") + b"\x00"
+    # 对齐到偶数
+    if len(blob) % 2:
+        blob += b"\x00"
+
+    # 每个 DLL 一组 INT(8 字节/项, 2 项含结尾 0) + IAT
+    tables_off = len(blob)
+    int_offsets: dict[str, int] = {}
+    fname_off = tables_off + 16 * n
+    func_names: list[tuple[str, int]] = []
+    cur = fname_off
+    for nm in imports:
+        int_offsets[nm] = len(blob)
+        blob += b"\x00" * 16  # INT (2 项)
+        blob += b"\x00" * 16  # IAT (2 项)
+        # 一个假的函数名
+        fn = ("Fake_" + nm.split(".")[0])[:24]
+        func_names.append((nm, cur))
+        blob += fn.encode("ascii") + b"\x00"
+        cur = len(blob) + tables_off - tables_off  # 保持相对
+        cur = len(blob)
+        if cur % 2:
+            blob += b"\x00"
+            cur = len(blob)
+
+    # 填导入描述符 + INT
+    for i, nm in enumerate(imports):
+        d_off = i * 20
+        struct.pack_into(
+            "<IIIII",
+            blob, d_off,
+            SECT_RVA + int_offsets[nm],   # OriginalFirstThunk (INT RVA)
+            0, 0,
+            SECT_RVA + name_offsets[nm],  # Name RVA
+            SECT_RVA + int_offsets[nm] + 16,  # FirstThunk (IAT RVA)
+        )
+        # INT[0] 指向函数名
+        fn_rva = SECT_RVA + func_names[i][1]
+        struct.pack_into("<Q", blob, int_offsets[nm], fn_rva)
+        struct.pack_into("<Q", blob, int_offsets[nm] + 16, fn_rva)
+
+    # 补齐到段大小
+    while len(blob) < 0x200:
+        blob += b"\x00"
+
+    # ---- DOS 头 ----
+    dos = bytearray(b"\x00" * 0x40)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 0x40)  # e_lfanew
+
+    # ---- PE 签名 + COFF ----
+    pe_sig = b"PE\x00\x00"
+    coff = struct.pack(
+        "<HHIIIHH",
+        0x8664,          # Machine = AMD64
+        1,               # NumberOfSections
+        0, 0, 0,
+        OPT_SIZE,        # SizeOfOptionalHeader
+        0x0022,          # Characteristics: EXECUTABLE | LARGE_ADDRESS_AWARE
+    )
+
+    # ---- 可选头（PE32+）----
+    opt = bytearray(OPT_SIZE)
+    struct.pack_into("<H", opt, 0, 0x20B)      # Magic = PE32+
+    struct.pack_into("<I", opt, 16, SECT_RAW)  # AddressOfEntryPoint
+    struct.pack_into("<I", opt, 20, SECT_RVA)  # BaseOfCode
+    struct.pack_into("<Q", opt, 24, 0x140000000)  # ImageBase
+    struct.pack_into("<I", opt, 32, SECT_RAW)  # SectionAlignment
+    struct.pack_into("<I", opt, 36, 0x200)     # FileAlignment
+    struct.pack_into("<H", opt, 40, 6)         # MajorOSVersion
+    struct.pack_into("<I", opt, 56, len(blob) + SECT_RAW)  # SizeOfImage
+    struct.pack_into("<I", opt, 60, SECT_RAW)  # SizeOfHeaders
+    struct.pack_into("<H", opt, 68, 3)         # Subsystem = CONSOLE
+    struct.pack_into("<I", opt, 108, 16)       # NumberOfRvaAndSizes
+    # DataDirectory[1] = Import Table（偏移 112 + 1*8）
+    struct.pack_into("<II", opt, 112 + 8, SECT_RVA, desc_size)
+
+    # ---- 段表 ----
+    name = b".text\x00\x00\x00"
+    sec = name + struct.pack(
+        "<IIII", len(blob), SECT_RVA, len(blob) + 0x200, SECT_RAW
+    ) + struct.pack("<I", 0x60000020)  # CODE | EXECUTE | READ
+
+    body = bytes(blob)
+    pad = (0x200 - (len(body) % 0x200)) % 0x200
+
+    out = bytearray()
+    out += dos
+    out += pe_sig + coff + bytes(opt) + sec
+    # 补齐到 SECT_RAW
+    if len(out) < SECT_RAW:
+        out += b"\x00" * (SECT_RAW - len(out))
+    out += body + b"\x00" * pad
+    return bytes(out)
 
 
 def run(verbose: bool = True) -> Runner:
@@ -70,17 +205,25 @@ def run(verbose: bool = True) -> Runner:
         # 1. payload 完整性
         # ------------------------------------------------------------------
         avail = installer.available_payloads()
+        _n_default = len(profiles.PROFILES[profiles.DEFAULT_VERSION].proxy_names)
         r.check(
-            "payload：5 个代理 DLL 全部存在且哈希匹配",
-            all(avail.values()) and len(avail) == 5,
+            f"payload：默认 profile（{profiles.DEFAULT_VERSION}）的 {_n_default} 个代理 DLL 全部就绪",
+            all(avail.values()) and len(avail) == _n_default,
             ", ".join(f"{k}={'OK' if v else 'BAD'}" for k, v in avail.items()),
         )
-        r.eq("payload：版本号", len(MANIFEST), 5)
+        r.eq("payload：默认 profile 清单条目数", len(MANIFEST), _n_default)
         v = installer.resolve_payload("version.dll")
         r.check(
-            "payload：version.dll 与上游公布哈希一致",
-            v.sha256.startswith("c844646d"),
+            f"payload：{profiles.DEFAULT_VERSION} 的 version.dll 与基线一致",
+            v.sha256 == profiles.PROFILES[profiles.DEFAULT_VERSION].manifest["version.dll"][0],
             f"sha256={v.sha256[:24]}…",
+        )
+        # 0.2.4 的 version.dll 是上游 README 公布过哈希的那个版本，单独核对
+        v24 = installer.resolve_payload("version.dll", version="0.2.4")
+        r.check(
+            "payload：0.2.4 的 version.dll 与上游公布哈希一致（c844646d…）",
+            v24.sha256.startswith("c844646d"),
+            f"sha256={v24.sha256[:24]}…",
         )
         bad = installer.PayloadFile("x.dll", Path("nope"), "", 0, False, "t")
         r.check("payload：缺失文件被判为不可用", not bad.ok)
@@ -88,15 +231,24 @@ def run(verbose: bool = True) -> Runner:
         # ------------------------------------------------------------------
         # 2. INI 生成
         # ------------------------------------------------------------------
+        # 注意：SM86 现在走 0.3.0（无 Router 键），SM75 走 0.2.4（有 Router 键）
         i86 = installer.build_ini("SM86", 0, 3, 1)
-        r.check("INI：SM86 路由正确", "Router=SM86" in i86 and "KernelImage=PTX" in i86)
+        r.check("INI：SM86 走 0.3.0 结构（含 [Runtime]、无 Router）",
+                "[Runtime]" in i86 and "Router=" not in i86, i86[:200])
+        i86_24 = installer.build_ini("SM86", 0, 3, 1, version="0.2.4")
+        r.check("INI：SM86 强制用 0.2.4 时含 Router=SM86",
+                "Router=SM86" in i86_24 and "KernelImage=PTX" in i86_24)
         i75 = installer.build_ini("SM75", 1, 3, 1)
-        r.check("INI：SM75 强制关闭近似采样", "Router=SM75" in i75 and "HardwareBilinear=0" in i75)
-        perf = installer.build_ini("SM86", 1, 3, 1)
-        r.check("INI：性能档写入 HardwareBilinear=1", "HardwareBilinear=1" in perf)
+        r.check("INI：SM75 走 0.2.4 且强制关闭近似采样",
+                "Router=SM75" in i75 and "HardwareBilinear=0" in i75)
+        perf = installer.build_ini("SM86", 1, 3, 1, version="0.2.4")
+        r.check("INI：0.2.4 性能档写入 HardwareBilinear=1", "HardwareBilinear=1" in perf)
         clamp = installer.build_ini("SM86", 0, 99, 99)
-        r.check("INI：倍率与日志级别被夹到合法区间", "MaxGeneratedFrames=3" in clamp and "Level=3" in clamp)
-        r.check("INI：非法路由回落到 SM86", "Router=SM86" in installer.build_ini("XX99"))
+        r.check("INI：倍率与日志级别被夹到合法区间",
+                f"MaxGeneratedFrames={profiles.PROFILE_030.max_frames}" in clamp and "Level=3" in clamp,
+                clamp[:200])
+        r.check("INI：非法路由回落到 SM86",
+                "Router=SM86" in installer.build_ini("XX99", version="0.2.4"))
 
         # ------------------------------------------------------------------
         # 2b. SM75（RTX 20 系列）路径 —— 与 SM86 同等对待
@@ -110,6 +262,111 @@ def run(verbose: bool = True) -> Runner:
         r.check("SM75：KernelImage 必须是 PTX（不能用 Cubin）", "KernelImage=PTX" in i75b)
         r.check("SM75：HardwareBilinear 被强制归零", "HardwareBilinear=1" not in i75b)
         r.check("SM75：注释写明对应 RTX 20 系列", "RTX 20 系列" in i75b)
+
+        # ------------------------------------------------------------------
+        # 2c. 倍率上限（评论区明确要求的功能）
+        # ------------------------------------------------------------------
+        r.eq("倍率：4X 选项映射到 MaxGeneratedFrames=3",
+             installer.frame_option_to_value("4X（上限，推荐）"), 3)
+        r.eq("倍率：3X 选项映射到 2", installer.frame_option_to_value("3X"), 2)
+        r.eq("倍率：2X 选项映射到 1", installer.frame_option_to_value("2X"), 1)
+        r.eq("倍率：未知文本回落到 3", installer.frame_option_to_value("乱写的"), 3)
+        ini2x = installer.build_ini("SM86", 0, 1, 1)
+        r.check("倍率：2X 的 INI 带 MaxGeneratedFrames=1", "MaxGeneratedFrames=1" in ini2x)
+        ini3x = installer.build_ini("SM86", 0, 2, 1)
+        r.check("倍率：3X 的 INI 带 MaxGeneratedFrames=2", "MaxGeneratedFrames=2" in ini3x)
+
+        # ------------------------------------------------------------------
+        # 2d. 扫描档位
+        # ------------------------------------------------------------------
+        r.check("扫描档位：三档都存在",
+                set(games.SCAN_PRESETS) == {"快速", "标准", "彻底"},
+                f"{list(games.SCAN_PRESETS)}")
+        r.check("扫描档位：彻底 > 标准 > 快速（解析上限）",
+                games.SCAN_PRESETS["彻底"]["max_exes"]
+                > games.SCAN_PRESETS["标准"]["max_exes"]
+                > games.SCAN_PRESETS["快速"]["max_exes"],
+                f"{[v['max_exes'] for v in games.SCAN_PRESETS.values()]}")
+
+        # ------------------------------------------------------------------
+        # 2e. 游戏能力预判
+        # ------------------------------------------------------------------
+        _capdir = tmp / "cap_test"
+        _capdir.mkdir(parents=True, exist_ok=True)
+        (_capdir / "nvngx_dlssg.dll").write_bytes(b"x")
+        cp1 = capability.predict("g.exe", _capdir, "confirmed", True)
+        r.check("预判：有帧生成组件 → 大概率可以",
+                cp1.level == capability.Support.GOOD, cp1.level.value)
+        (_capdir / "nvngx_dlssg.dll").unlink()
+        (_capdir / "nvngx_dlss.dll").write_bytes(b"x")
+        cp2 = capability.predict("g.exe", _capdir, "confirmed", True)
+        r.check("预判：只有超分组件 → 不太可能",
+                cp2.level == capability.Support.UNLIKELY, cp2.level.value)
+        cp3 = capability.predict("g.exe", _capdir, "vulkan", False)
+        r.check("预判：Vulkan → 不支持且不允许装",
+                cp3.level == capability.Support.NO and not cp3.installable, cp3.level.value)
+        cp4 = capability.predict("Palworld-Win64-Shipping.exe", _capdir, "confirmed", True, "Palworld")
+        r.check("预判：已知游戏被识别", cp4.level == capability.Support.UNLIKELY, cp4.level.value)
+
+        # ------------------------------------------------------------------
+        # 2f. 双 profile 适配层（0.2.4 / 0.3.0）
+        # ------------------------------------------------------------------
+        r.check("profile：两个版本都已定义", set(profiles.PROFILES) == {"0.2.4", "0.3.0"},
+                f"{list(profiles.PROFILES)}")
+        r.check("profile：0.2.4 支持 SM75", profiles.PROFILE_024.supports_sm75)
+        r.check("profile：0.3.0 **不**支持 SM75（上游已移除内核）",
+                not profiles.PROFILE_030.supports_sm75)
+        r.eq("profile：SM86 自动选 0.3.0", profiles.for_router("SM86").version, "0.3.0")
+        r.eq("profile：SM75 自动选 0.2.4", profiles.for_router("SM75").version, "0.2.4")
+        r.check("profile：0.3.0 上限 6X", profiles.PROFILE_030.max_multiplier == 6)
+        r.check("profile：0.2.4 上限 4X", profiles.PROFILE_024.max_multiplier == 4)
+
+        # INI 结构差异
+        i030 = installer.build_ini("SM86", 0, 5, 1)
+        r.check("profile：0.3.0 的 INI 含 [Runtime] 段", "[Runtime]" in i030)
+        r.check("profile：0.3.0 的 INI 含 Optimized", "Optimized=" in i030)
+        r.check("profile：0.3.0 的 INI 不含 Router（该键已删除）", "Router=" not in i030)
+        r.check("profile：0.3.0 支持 6X（MaxGeneratedFrames=5）",
+                "MaxGeneratedFrames=5" in i030)
+        i024 = installer.build_ini("SM75", 0, 3, 1)
+        r.check("profile：0.2.4 的 INI 含 Router", "Router=" in i024)
+        r.check("profile：0.2.4 的 INI 不含 [Runtime]", "[Runtime]" not in i024)
+        r.eq("profile：版本识别（0.3.0）",
+             profiles.detect_ini_version(_write_tmp(tmp, "a.ini", i030)), "0.3.0")
+        r.eq("profile：版本识别（0.2.4）",
+             profiles.detect_ini_version(_write_tmp(tmp, "b.ini", i024)), "0.2.4")
+
+        # 入口差异
+        r.check("profile：0.3.0 没有 winhttp（上游已移除）",
+                "winhttp.dll" not in profiles.PROFILE_030.proxy_names,
+                f"{profiles.PROFILE_030.proxy_names}")
+        r.check("profile：0.3.0 新增 dbghelp 和 d3d12",
+                "dbghelp.dll" in profiles.PROFILE_030.proxy_names
+                and "d3d12.dll" in profiles.PROFILE_030.proxy_names)
+        r.check("profile：0.2.4 有 winhttp",
+                "winhttp.dll" in profiles.PROFILE_024.proxy_names)
+        r.check("profile：两个 profile 的 version.dll 哈希不同（确实是不同构建）",
+                profiles.PROFILE_024.manifest["version.dll"][0]
+                != profiles.PROFILE_030.manifest["version.dll"][0])
+
+        # 两个 profile 的 payload 都要齐全可用
+        for _v in profiles.all_versions():
+            _ok, _why = installer.profile_available(_v)
+            r.check(f"profile：{_v} 的 payload 齐全", _ok, _why)
+
+        # 关键回归：SM75 的完整链路必须走 0.2.4 并成功
+        # （重构时踩过：execute_plan 用错基线导致 SM75 装不上）
+        gdirP = tmp / "GameP"
+        edP = _make_fake_game(gdirP, foreign=False)
+        planP = installer.make_plan(
+            edP, edP / "FakeGame-Win64-Shipping.exe", "version.dll", "SM75", "GameP"
+        )
+        r.eq("profile：SM75 的 plan 选中 0.2.4", planP.version, "0.2.4")
+        resP = installer.execute_plan(planP)
+        r.check("profile：SM75 能装上（基线按 profile 取）", resP.success, resP.message)
+        r.eq("profile：SM75 落盘的 INI 是 0.2.4 结构",
+             profiles.detect_ini_version(edP / INI_NAME), "0.2.4")
+        installer.uninstall(edP)
 
         # ------------------------------------------------------------------
         # 3. 环境检测（真机）
@@ -129,21 +386,70 @@ def run(verbose: bool = True) -> Runner:
         r.eq("环境：GTX 1660 不给路由", gpu.classify("NVIDIA GeForce GTX 1660 SUPER")[1], "")
 
         # ------------------------------------------------------------------
-        # 4. PE 解析
+        # 4. PE 解析（用自带的合成 PE，不依赖任何系统文件）
         # ------------------------------------------------------------------
-        sys_exe = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe"
-        if sys_exe.is_file():
-            info = pe.inspect(sys_exe)
-            r.check("PE：能解析系统 EXE", info.ok and info.is_x64, f"arch={info.arch}")
-            r.check(
-                "PE：导入表里全是合法 DLL 名",
-                all(x.lower().endswith((".dll", ".drv", ".ocx", ".exe", ".cpl", ".sys")) for x in info.imports),
-                f"{len(info.imports)} 项",
-            )
-            r.check("PE：notepad 不含 D3D12", not info.uses_d3d12)
+        synth = tmp / "synth_x64.exe"
+        synth.write_bytes(synth_pe(("KERNEL32.dll", "USER32.dll", "d3d12.dll", "dxgi.dll")))
+        info = pe.inspect(synth)
+        r.check("PE：能解析合成的 64 位 PE", info.ok and info.is_x64, f"arch={info.arch} err={info.error}")
+        r.check(
+            "PE：导入表里全是合法 DLL 名",
+            all(x.lower().endswith((".dll", ".drv", ".ocx", ".exe", ".cpl", ".sys")) for x in info.imports),
+            f"{len(info.imports)} 项: {info.imports}",
+        )
+        r.check(
+            "PE：能正确读出 d3d12 导入",
+            "d3d12.dll" in {i.lower() for i in info.imports},
+            f"imports={info.imports}",
+        )
+        r.check("PE：能正确判定为 D3D12 游戏", info.uses_d3d12)
+
+        synth_dx11 = tmp / "synth_dx11.exe"
+        synth_dx11.write_bytes(synth_pe(("KERNEL32.dll", "d3d11.dll")))
+        info11 = pe.inspect(synth_dx11)
+        v11 = gfxapi.judge(
+            info11.static_imports, info11.delayed_imports, info11.text_hits,
+            synth_dx11.parent, info11.is_x64,
+        )
+        r.check(
+            "PE：仅 D3D11 的程序被判为不支持（不再用布尔值）",
+            v11.level == gfxapi.ApiLevel.D3D11_ONLY and not v11.can_install,
+            f"level={v11.level.value} evidence={v11.evidence} counter={v11.counter}",
+        )
+        r.check(
+            "PE：判定给出了可读依据",
+            len(v11.detail_lines()) >= 2,
+            f"{v11.detail_lines()}",
+        )
         junk = tmp / "junk.exe"
         junk.write_bytes(b"not a pe")
         r.check("PE：非 PE 文件被安全拒绝", not pe.inspect(junk).ok)
+        r.check("PE：不存在的文件不抛异常", not pe.inspect(tmp / "no-such.exe").ok)
+
+        # ---- 分级判定的核心场景（这是「明明 DX12 却提示 DX11」的修复点）----
+        both = tmp / "synth_both.exe"
+        both.write_bytes(synth_pe(("KERNEL32.dll", "d3d11.dll", "d3d12.dll", "dxgi.dll")))
+        ib = pe.inspect(both)
+        vb = gfxapi.judge(ib.static_imports, ib.delayed_imports, ib.text_hits, both.parent, ib.is_x64)
+        r.check(
+            "分级：同时导入 d3d11 + d3d12 仍判为可安装（UE 游戏常态）",
+            vb.can_install and vb.level == gfxapi.ApiLevel.CONFIRMED,
+            f"level={vb.level.value}",
+        )
+        r.check(
+            "分级：会说明「同时导入属正常」",
+            any("同时导入" in e for e in vb.evidence),
+            f"{vb.evidence}",
+        )
+        vul = tmp / "synth_vulkan.exe"
+        vul.write_bytes(synth_pe(("KERNEL32.dll", "vulkan-1.dll", "dxgi.dll")))
+        iv = pe.inspect(vul)
+        vv = gfxapi.judge(iv.static_imports, iv.delayed_imports, iv.text_hits, vul.parent, iv.is_x64)
+        r.check(
+            "分级：纯 Vulkan 游戏被判为不支持",
+            vv.level == gfxapi.ApiLevel.VULKAN and not vv.can_install,
+            f"level={vv.level.value}",
+        )
 
         # ------------------------------------------------------------------
         # 5. 安装 / 校验 / 卸载 全链路（含外来文件备份还原）
@@ -180,7 +486,7 @@ def run(verbose: bool = True) -> Runner:
         r.eq(
             "安装：DLL 哈希与 payload 一致",
             installer.sha256_file(exe_dir / "version.dll"),
-            MANIFEST["version.dll"][0],
+            profiles.PROFILES[profiles.DEFAULT_VERSION].manifest["version.dll"][0],
         )
         after_install = sorted(p.name for p in exe_dir.iterdir())
         r.check(
@@ -296,7 +602,7 @@ def run(verbose: bool = True) -> Runner:
         # 10. 安全护栏
         # ------------------------------------------------------------------
         pf_run = installer.preflight(
-            ed4, Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe",
+            ed4, ed4 / "FakeGame-Win64-Shipping.exe",
             "version.dll", "SM86", env=env, running_names=["explorer.exe"],
         )
         r.check("护栏：游戏运行中会被拦下", any("正在运行" in c.title for c in pf_run.errors))
@@ -414,10 +720,9 @@ def run(verbose: bool = True) -> Runner:
         installer.execute_plan(
             installer.make_plan(edF, edF / "FakeGame-Win64-Shipping.exe", "version.dll", "SM86", "GameF")
         )
-        shutil.copy2(
-            Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe",
-            edF / "explorer.exe",
-        )
+        # 用合成的 PE 造一个"正在运行"的进程名场景：
+        # explorer.exe 是必定在运行的进程，把它复制进游戏目录即可
+        (edF / "explorer.exe").write_bytes(synth_pe())
         urF = installer.uninstall(edF)
         r.check(
             "护栏：游戏运行中拒绝卸载",
@@ -503,13 +808,41 @@ def run(verbose: bool = True) -> Runner:
             "HardwareBilinear=0" in (edI / INI_NAME).read_text("utf-8"),
         )
         r.check(
-            "SM75 链路：DLL 与内置 payload 哈希一致",
-            installer.sha256_file(edI / "version.dll") == MANIFEST["version.dll"][0],
+            "SM75 链路：DLL 与 0.2.4 的 payload 哈希一致",
+            installer.sha256_file(edI / "version.dll")
+            == profiles.PROFILE_024.manifest["version.dll"][0],
+            f"{profiles.PROFILE_024.manifest['version.dll'][0][:16]}…",
         )
         vrI = installer.verify(edI)
         r.check("SM75 链路：体检健康", vrI.installed and vrI.healthy)
         urI = installer.uninstall(edI)
         r.check("SM75 链路：卸载还原干净", urI.success and not (edI / INI_NAME).exists())
+
+        # ------------------------------------------------------------------
+        # 17b. 反复安装/卸载不会把"我们自己生成的 INI"当原始文件还原回去
+        #      （真机实测踩到过：多次往返后目录里残留一份工具生成的 ini）
+        # ------------------------------------------------------------------
+        gdirJ = tmp / "GameJ"
+        edJ = _make_fake_game(gdirJ, foreign=False)
+        ur_last = None
+        for round_no in range(3):
+            installer.execute_plan(
+                installer.make_plan(
+                    edJ, edJ / "FakeGame-Win64-Shipping.exe",
+                    "version.dll", "SM86", f"GameJ-{round_no}",
+                )
+            )
+            ur_last = installer.uninstall(edJ)
+            if not ur_last.success:
+                break
+        r.check("反复往返：三次安装卸载都成功",
+                ur_last is not None and ur_last.success,
+                ur_last.message if ur_last else "没跑")
+        r.check(
+            "反复往返：最终不残留本工具的任何文件",
+            not (edJ / INI_NAME).exists() and not (edJ / "version.dll").exists(),
+            f"残留：{sorted(p.name for p in edJ.iterdir())}",
+        )
 
         # ------------------------------------------------------------------
         # 17. 路径安全：状态与备份只落在 LOCALAPPDATA

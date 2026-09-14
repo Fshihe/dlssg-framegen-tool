@@ -27,6 +27,20 @@ _FALLBACK_NEEDLES = (
     b"D3D12CreateDevice",
     b"d3d12core.dll",
 )
+
+# 代码段里要搜的符号 —— 用于分级判定「到底是不是 D3D12 游戏」
+# 注意：游戏常常同时导入 d3d11 和 d3d12，所以这里两个都收集，交给
+# gfxapi.judge() 综合定级，而不是看到一个 d3d11 就判死。
+_CODE_NEEDLES: dict[str, bytes] = {
+    "d3d12.dll": b"d3d12.dll",
+    "d3d12core.dll": b"d3d12core.dll",
+    "D3D12CreateDevice": b"d3d12createdevice",
+    "D3D12SerializeVersionedRootSignature": b"d3d12serializeversionedrootsignature",
+    "d3d11.dll": b"d3d11.dll",
+    "D3D11CreateDevice": b"d3d11createdevice",
+    "dxgi.dll": b"dxgi.dll",
+    "vulkan-1.dll": b"vulkan-1.dll",
+}
 _MAX_SCAN_BYTES = 96 * 1024 * 1024
 _CHUNK = 4 * 1024 * 1024
 
@@ -48,9 +62,14 @@ class PEInfo:
     machine: int = 0
     arch: str = "unknown"
     is_pe: bool = False
-    imports: tuple[str, ...] = ()
+    imports: tuple[str, ...] = ()            # 静态导入（合并，兼容旧调用）
+    static_imports: tuple[str, ...] = ()     # 仅标准导入表
+    delayed_imports: tuple[str, ...] = ()    # 仅延迟导入表
     char_hits: tuple[str, ...] = ()
+    text_hits: dict = field(default_factory=dict)   # .text 段里各标记的命中次数
     size: int = 0
+    scanned_bytes: int = 0                   # 实际扫描的字节数（用于性能核对）
+    sections: tuple = ()
 
     # 便捷判定
     @property
@@ -59,10 +78,11 @@ class PEInfo:
 
     @property
     def uses_d3d12(self) -> bool:
+        """布尔判定（保留给旧调用方）。分级判定请用 dgcore.gfxapi.judge。"""
         low = {i.lower() for i in self.imports}
         if "d3d12.dll" in low or "d3d12core.dll" in low:
             return True
-        return bool(self.char_hits)
+        return bool(self.char_hits) or bool(self.text_hits)
 
     @property
     def uses_d3d11(self) -> bool:
@@ -153,8 +173,83 @@ def _parse_import_table(
             into.add(nm)
 
 
+def _scan_sections(fp, sections, needles: dict[str, bytes], budget: int = 48 << 20):
+    """扫描「可能含有意义」的段，找到符号即早停。
+
+    段布局的坑（实测两个真实游戏）：
+      · 黑神话：.text 只有 97 字节，代码实际在 .xtls/.data1 这类非标准段里
+      · Palworld：代码在 .text（108MB），但 API 名字符串在 .rdata
+    所以**不能只扫 .text**，也不能盲目扫全部段。
+
+    策略：按「命中可能性」排序，在总预算内依次扫描，命中足够就停。
+      1. 名字像代码/只读数据的段（.text/.rdata/.rodata/.data…）
+      2. 体积合理的可执行段
+      3. 其余按体积从小到大（避免一上来就啃几百 MB 的巨型段）
+
+    budget 是总读取上限，防止在超大文件上卡住。
+    """
+    hits: dict[str, int] = {}
+
+    CODEY = (".text", ".rdata", ".rodata", ".data", ".ecode", ".itext", ".sdata",
+             "_rdata", ".rdata$zzz", ".bss", ".pdata")
+    SKIP = (".rsrc", ".reloc", ".tls", ".debug", ".pdb", ".bind", ".idata",
+            ".impdata", ".link", ".xdata", ".sxdata", ".msvcjmc")
+
+    def priority(s) -> tuple:
+        nm = s.name.lower()
+        if nm in SKIP:
+            return (9, s.raw_size)
+        if nm in CODEY:
+            return (0, s.raw_size)
+        if nm.startswith(".text") or "code" in nm:
+            return (1, s.raw_size)
+        if "data" in nm or "rodata" in nm:
+            return (2, s.raw_size)
+        # 未知段名（黑神话的 .xtls / .data1 走这里），按体积从小到大试
+        return (5, s.raw_size)
+
+    wide_needles = {
+        name: (n, n.decode("ascii", "ignore").lower().encode("utf-16-le"))
+        for name, n in needles.items()
+    }
+
+    spent = 0
+    # 已命中的标记不用再找
+    remaining = set(needles)
+
+    for sec in sorted(sections, key=priority):
+        if spent >= budget or not remaining:
+            break
+        if sec.raw_size <= 0 or sec.raw_pointer <= 0:
+            continue
+        # 单段不读超过剩余预算，也不超过 24MB
+        cap = min(sec.raw_size, 24 << 20, budget - spent)
+        if cap <= 0:
+            continue
+
+        fp.seek(sec.raw_pointer)
+        left = cap
+        tail = b""
+        overlap = 64
+        while left > 0:
+            chunk = fp.read(min(_CHUNK, left))
+            if not chunk:
+                break
+            left -= len(chunk)
+            spent += len(chunk)
+            buf = (tail + chunk).lower()
+            for name in list(remaining):
+                n, w = wide_needles[name]
+                if n in buf or w in buf:
+                    hits[name] = hits.get(name, 0) + 1
+                    remaining.discard(name)
+            tail = buf[-overlap:]
+
+    return hits, spent
+
+
 def _byte_scan(fp, size: int, needles) -> tuple[str, ...]:
-    """整文件分块扫描 ASCII / UTF-16LE 关键字，用于识别动态加载 d3d12 的游戏。"""
+    """兼容旧接口的整文件扫描（新代码请用 _scan_sections）。"""
     hits: set[str] = set()
     wide = [n.decode("ascii").lower().encode("utf-16-le") for n in needles]
     limit = min(size, _MAX_SCAN_BYTES)
@@ -241,9 +336,14 @@ def inspect(path: str | Path) -> PEInfo:
                 vs, va, rs, rp = struct.unpack("<IIII", s[8:24])
                 sections.append(Section(nm, vs, va, rs, rp))
 
-            found: set[str] = set()
+            static_found: set[str] = set()
+            delayed_found: set[str] = set()
+
             # 标准导入表：20 字节步长，DLL 名 RVA 在 +12
-            _parse_import_table(fp, sections, dirs[DIR_IMPORT][0], dirs[DIR_IMPORT][1], found)
+            _parse_import_table(
+                fp, sections, dirs[DIR_IMPORT][0], dirs[DIR_IMPORT][1], static_found
+            )
+
             # 延迟导入表：32 字节步长，DLL 名 RVA 在 +4
             # Attributes 位 0 (dlattrRva) 未置位时字段是 VA 而非 RVA（极老的链接器产物），跳过。
             d_rva, d_size = dirs[DIR_DELAY_IMPORT]
@@ -254,13 +354,20 @@ def inspect(path: str | Path) -> PEInfo:
                     attrs = struct.unpack("<I", _read(fp, attrs_off, 4))[0]
                 if attrs & 0x1:
                     _parse_import_table(
-                        fp, sections, d_rva, d_size, found, stride=32, name_off=4
+                        fp, sections, d_rva, d_size, delayed_found, stride=32, name_off=4
                     )
-            info.imports = tuple(sorted(found))
 
-            low = {i.lower() for i in found}
-            if "d3d12.dll" not in low and "d3d12core.dll" not in low:
-                info.char_hits = _byte_scan(fp, info.size, _FALLBACK_NEEDLES)
+            info.static_imports = tuple(sorted(static_found))
+            info.delayed_imports = tuple(sorted(delayed_found))
+            info.imports = tuple(sorted(static_found | delayed_found))
+            info.sections = tuple((s.name, s.raw_size) for s in sections)
+
+            # 扫描各段找符号（按可能性排序 + 总预算 + 命中即早停）
+            hits, scanned = _scan_sections(fp, sections, _CODE_NEEDLES)
+            info.text_hits = hits
+            info.scanned_bytes = scanned
+            if hits:
+                info.char_hits = tuple(f"代码段命中 {k}" for k in sorted(hits))
 
             info.ok = True
             return info

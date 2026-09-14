@@ -1,8 +1,11 @@
 """DLSSG 帧生成一键开启工具 —— 核心库（支持 RTX 20 / 30 系列）。
 
 把 https://github.com/sdli1995/dlssg_for_sm86 的代理 DLL + INI
-按正确的显卡路由安装到游戏真正的渲染 EXE 目录
-（RTX 30 系列 → Router=SM86；RTX 20 系列 → Router=SM75）。
+按正确的显卡路由安装到游戏真正的渲染 EXE 目录。
+
+内置两个上游版本，按显卡自动选（版本差异见 profiles.py）：
+  RTX 30 系列 → 0.3.0（代理模式，最高 6X）
+  RTX 20 系列 → 0.2.4（最后一个支持 SM75 的版本，最高 4X，实验性）
 
 设计原则（安全第一）
 --------------------
@@ -17,7 +20,7 @@ from __future__ import annotations
 
 APP_NAME = "DLSSG 帧生成一键开启工具"
 APP_ID = "dlssg-sm86-tool"
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 
 # 上游 Mod 版本（payload 来源）
 UPSTREAM_NAME = "DLSSG Native"

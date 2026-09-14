@@ -19,6 +19,8 @@ from tkinter import filedialog, messagebox, ttk
 from . import APP_NAME, UPSTREAM_REPO, UPSTREAM_VERSION, VERSION
 from . import anticheat as ac
 from . import games, gpu, installer, winenv
+from . import capability
+from . import profiles
 from .gpu import VERDICT_NOT_NEEDED, VERDICT_OK
 from .paths import log as _log
 from .paths import reports_root
@@ -75,11 +77,14 @@ class App(tk.Tk):
         self.selected: games.Game | None = None
         self.candidates: list[games.ExeCandidate] = []
         self.chosen_exe: Path | None = None
+        self.prediction = None
         self.anticheat = ac.AntiCheatReport([], [])
 
         self.proxy_var = tk.StringVar(value="自动选择")
         self.sample_var = tk.StringVar(value="精确档（推荐，HardwareBilinear=0）")
         self.loglv_var = tk.StringVar(value="仅记录错误（Level=1）")
+        self.frames_var = tk.StringVar(value=installer.FRAME_OPTIONS[0])
+        self.preset_var = tk.StringVar(value="标准")
         self.filter_var = tk.BooleanVar(value=True)
         self.exe_var = tk.StringVar(value="")
         self.router_var = tk.StringVar(value="自动（按显卡判断）")
@@ -164,13 +169,14 @@ class App(tk.Tk):
         bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         bar.columnconfigure(2, weight=1)
         ttk.Button(bar, text="浏览游戏文件夹…", command=self.browse_game).grid(row=0, column=0)
-        ttk.Button(bar, text="重新扫描游戏库", command=self.scan_games).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(bar, text="直接指定游戏主程序…", command=self.browse_exe).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(bar, text="重新扫描游戏库", command=self.scan_games).grid(row=0, column=2, padx=(6, 0), sticky="w")
         ttk.Checkbutton(
-            bar, text="只显示能开启帧生成的游戏（D3D12）", variable=self.filter_var,
+            bar, text="只显示能开启帧生成的", variable=self.filter_var,
             command=self._apply_filter,
-        ).grid(row=0, column=2, sticky="w", padx=(12, 0))
+        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
         self.scan_status = ttk.Label(bar, text="", font=FONT, foreground=C_DIM)
-        self.scan_status.grid(row=0, column=3, sticky="e")
+        self.scan_status.grid(row=0, column=4, sticky="e")
 
         left = ttk.Frame(game_box)
         left.grid(row=1, column=0, sticky="nsew")
@@ -214,34 +220,54 @@ class App(tk.Tk):
         # ---------------- ③ 选项 ----------------
         opt = ttk.LabelFrame(root, text=" ③ 选项（默认值适合绝大多数人，不用改） ", padding=10)
         opt.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        opt.columnconfigure(1, weight=1)
-        opt.columnconfigure(3, weight=1)
+        for col in (1, 3):
+            opt.columnconfigure(col, weight=1)
 
         ttk.Label(opt, text="计算路由：", font=FONT).grid(row=0, column=0, sticky="w")
         self.router_combo = ttk.Combobox(
             opt, textvariable=self.router_var, font=FONT, state="readonly",
-            values=["自动（按显卡判断）", "SM86（RTX 30 系列）", "SM75（RTX 20 系列）"],
+            values=["自动（按显卡判断）", "SM86（RTX 30 系列）", "SM75（RTX 20 系列，实验性）"],
         )
         self.router_combo.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        self.router_combo.bind("<<ComboboxSelected>>", self._on_router_change)
 
         ttk.Label(opt, text="代理入口：", font=FONT).grid(row=0, column=2, sticky="w")
         self.proxy_combo = ttk.Combobox(
             opt, textvariable=self.proxy_var, font=FONT, state="readonly",
-            values=["自动选择"] + installer.PROXY_ORDER,
+            values=["自动选择"] + list(profiles.PROFILE_024.proxy_names),
         )
         self.proxy_combo.grid(row=0, column=3, sticky="ew")
 
-        ttk.Label(opt, text="采样档：", font=FONT).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        # 倍率上限：这是评论区明确要求加的功能（0.3.0 最高 6X）
+        ttk.Label(opt, text="最高倍率：", font=FONT).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.frames_combo = ttk.Combobox(
+            opt, textvariable=self.frames_var, font=FONT, state="readonly",
+            values=list(installer.FRAME_OPTIONS),
+        )
+        self.frames_combo.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+
+        ttk.Label(opt, text="采样档：", font=FONT).grid(row=1, column=2, sticky="w", pady=(6, 0))
         ttk.Combobox(
             opt, textvariable=self.sample_var, font=FONT, state="readonly",
             values=["精确档（推荐，HardwareBilinear=0）", "性能档（近似采样，HardwareBilinear=1，仅 SM86）"],
-        ).grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+        ).grid(row=1, column=3, sticky="ew", pady=(6, 0))
 
-        ttk.Label(opt, text="日志级别：", font=FONT).grid(row=1, column=2, sticky="w", pady=(6, 0))
+        ttk.Label(opt, text="扫描档位：", font=FONT).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.preset_combo = ttk.Combobox(
+            opt, textvariable=self.preset_var, font=FONT, state="readonly",
+            values=list(games.SCAN_PRESETS.keys()),
+        )
+        self.preset_combo.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
+
+        ttk.Label(opt, text="日志级别：", font=FONT).grid(row=2, column=2, sticky="w", pady=(6, 0))
         ttk.Combobox(
             opt, textvariable=self.loglv_var, font=FONT, state="readonly",
             values=["仅记录错误（Level=1）", "关闭日志（Level=0）", "运行诊断（Level=2）", "详细日志（Level=3）"],
-        ).grid(row=1, column=3, sticky="ew", pady=(6, 0))
+        ).grid(row=2, column=3, sticky="ew", pady=(6, 0))
+
+        self.frames_hint = ttk.Label(opt, text="", font=FONT, foreground=C_DIM)
+        self.frames_hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         # ---------------- 操作按钮 ----------------
         act = ttk.Frame(root)
@@ -413,26 +439,34 @@ class App(tk.Tk):
         self._log(f"显卡：{g.name if g else '(无)'} → {g.family if g else '-'} / Router={env.router}")
         self._log(f"硬件加速GPU计划(HAGS)：{winenv.describe(env.hags, env.hags_raw)}",
                   "err" if env.hags is False else "")
+        # 路由确定后，把代理入口/倍率的可选范围刷成对应 profile 的
+        self._sync_profile_widgets()
+        _prof = profiles.for_router(env.router)
+        self._log(f"将使用上游 {_prof.version}：{_prof.explanation}")
+        if env.router == "SM75":
+            self._log("⚠ 20 系是实验性支持（上游 0.3.0 已移除 SM75 内核，本工具自动用 0.2.4）", "warn")
 
     # ------------------------------------------------------------------
     # ② 游戏
     # ------------------------------------------------------------------
 
     def scan_games(self) -> None:
+        preset = self.preset_var.get()
+
         def work():
             libs = games.scan_libraries()
             for g in libs:
-                games.inspect_game(g)
+                games.inspect_game(g, preset=preset)
             return libs
 
         def done(libs: list[games.Game]):
             self.game_list = libs
             n_ok = sum(1 for g in libs if g.best and g.best.eligible)
-            self._log(f"扫描完成：发现 {len(libs)} 个游戏，其中 {n_ok} 个可以开启帧生成（D3D12）")
+            self._log(f"扫描完成（「{preset}」档）：发现 {len(libs)} 个游戏，其中 {n_ok} 个可以开启帧生成")
             self._set_status(f"已扫描到 {len(libs)} 个游戏")
             self._apply_filter()
 
-        self._run(work, done, status="正在扫描游戏库并分析主程序…")
+        self._run(work, done, status=f"正在按「{preset}」档扫描游戏库…")
 
     def _apply_filter(self) -> None:
         self.listbox.delete(0, "end")
@@ -458,6 +492,92 @@ class App(tk.Tk):
             return list(self.game_list)
         return [g for g in self.game_list if g.best and g.best.eligible]
 
+    def _on_router_change(self, _evt=None) -> None:
+        """路由变了 → 可用的代理入口和倍率也跟着变（0.2.4 和 0.3.0 不一样）。"""
+        self._sync_profile_widgets()
+
+    def _current_router(self) -> str:
+        rsel = self.router_var.get()
+        if rsel.startswith("自动"):
+            return self.env.router if self.env else "SM86"
+        return "SM75" if "SM75" in rsel else "SM86"
+
+    def _sync_profile_widgets(self) -> None:
+        """按当前路由把「代理入口」「最高倍率」的选项刷成对应 profile 的。"""
+        router = self._current_router()
+        prof = profiles.for_router(router)
+
+        # 代理入口
+        opts = ["自动选择"] + list(prof.proxy_names)
+        try:
+            self.proxy_combo.configure(values=opts)
+            if self.proxy_var.get() not in opts:
+                self.proxy_var.set("自动选择")
+        except tk.TclError:
+            pass
+
+        # 倍率
+        fopts = installer.frame_options_for(prof)
+        try:
+            self.frames_combo.configure(values=fopts)
+            if self.frames_var.get() not in fopts:
+                self.frames_var.set(fopts[0])
+        except tk.TclError:
+            pass
+
+        # 说明文字
+        hint = f"将使用上游 {prof.version}（{prof.explanation}）"
+        if router == "SM75":
+            hint += "\n⚠ 20 系为实验性支持：上游 0.3.0 已移除 SM75 内核，本工具自动改用 0.2.4。"
+        try:
+            self.frames_hint.configure(
+                text=hint, foreground=C_WARN if router == "SM75" else C_DIM
+            )
+        except tk.TclError:
+            pass
+
+    def _on_preset_change(self, _evt=None) -> None:
+        """切换扫描档位后重扫当前游戏。"""
+        if self.selected is not None:
+            self.rescan_current()
+
+    def rescan_current(self) -> None:
+        g = self.selected
+        if g is None:
+            return
+        preset = self.preset_var.get()
+
+        def work():
+            games.inspect_game(g, preset=preset)
+            return g
+
+        def done(_g):
+            self._render_detail()
+            self._set_status(f"已按「{preset}」档重新扫描")
+
+        self._run(work, done, status=f"正在按「{preset}」档扫描 {g.name} …")
+
+    def _render_prediction(self, pred) -> None:
+        """把「这个游戏行不行」的判断显示出来 —— 装之前就能看到。"""
+        if pred is None:
+            return
+        icon = {
+            capability.Support.GOOD: "✓",
+            capability.Support.MAYBE: "·",
+            capability.Support.UNLIKELY: "⚠",
+            capability.Support.NO: "✗",
+        }.get(pred.level, "·")
+        self.detail.insert("end", f"\n{icon} {pred.headline}\n", pred.level.color)
+        for r in pred.reasons:
+            self.detail.insert("end", f"　　{r}\n", "dim")
+        if pred.advice:
+            self.detail.insert("end", "　　建议：", "dim")
+            for i, ln in enumerate(pred.advice.splitlines()):
+                if ln.strip():
+                    # 第一行跟在「建议：」后面，其余行自己起一行
+                    prefix = "" if i == 0 else "　　　　　"
+                    self.detail.insert("end", f"{prefix}{ln}\n", "dim")
+
     def _on_select(self, _evt=None) -> None:
         sel = self.listbox.curselection()
         cur = self._current_list()
@@ -472,6 +592,54 @@ class App(tk.Tk):
         if not path:
             return
         self._add_manual(Path(path))
+
+    def browse_exe(self) -> None:
+        """直接指定游戏主程序 EXE —— 自动扫描不准时的兜底手段。"""
+        path = filedialog.askopenfilename(
+            title="选择游戏主程序（渲染 EXE）",
+            filetypes=[("可执行文件", "*.exe"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        exe = Path(path)
+        self._log(f"你指定的主程序：{exe}")
+
+        def work():
+            cand = games.analyse_one(exe)
+            return cand
+
+        def done(cand: games.ExeCandidate):
+            g = games.Game(
+                name=exe.parent.name or exe.stem,
+                root=exe.parent,
+                source="手动指定 EXE",
+                appid="",
+                candidates=[cand],
+            )
+            self.game_list.insert(0, g)
+            self.filter_var.set(False)
+            self._apply_filter()
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(0)
+            self._on_select()
+
+            if not cand.is_x64:
+                messagebox.showwarning(
+                    "这不是 64 位程序",
+                    f"{exe.name} 是 {cand.api_label} 之外的架构，本 Mod 需要 64 位程序。",
+                )
+            elif not cand.eligible:
+                messagebox.showwarning(
+                    "这个主程序可能不合适",
+                    f"{exe.name}\n\n{cand.api_label}\n\n"
+                    + "\n".join(cand.api_counter or cand.reasons[:5])
+                    + "\n\n如果游戏确实支持帧生成，可能你选错了 EXE —— "
+                    "要找真正渲染画面的那个（通常在 Binaries\\Win64 之类目录里）。",
+                )
+            else:
+                self._log(f"✓ {exe.name}：{cand.api_label}，可以用", "ok")
+
+        self._run(work, done, status=f"正在分析 {exe.name} …")
 
     def _add_manual(self, path: Path) -> None:
         def work():
@@ -514,27 +682,39 @@ class App(tk.Tk):
 
         if not cands:
             self.detail.insert("end", "✗ 没有找到可执行程序\n", "err")
+            self.prediction = None
         elif not elig:
-            self.detail.insert("end", "✗ 这个游戏不能装本 Mod\n", "err")
             b = cands[0]
-            why = next((r for r in b.reasons if "D3D1" in r or "Vulkan" in r or "64 位" in r), "")
-            self.detail.insert("end", f"　主程序 {b.name}：{why}\n", "warn")
-            self.detail.insert("end", "　本 Mod 仅支持 64 位 D3D12 游戏。\n", "dim")
+            self.prediction = capability.predict(
+                b.name, b.directory, b.api_level, False, g.name
+            )
+            self._render_prediction(self.prediction)
+            self.detail.insert("end", f"\n　主程序 {b.name}\n", "mono")
+            for r in b.reasons[:5]:
+                self.detail.insert("end", f"　　· {r}\n", "dim")
         else:
             b = max(elig, key=lambda c: c.score)
             self.chosen_exe = b.path
-            self.detail.insert("end", f"✓ 已自动定位主程序\n", "ok")
+            self.detail.insert("end", f"✓ 已定位主程序（{b.confidence}）\n", "ok")
             self.detail.insert("end", f"　{b.path}\n", "mono")
-            self.detail.insert("end", "\n")
+
+            # 能力预判：这是评论区「装了才发现游戏没有帧生成」的对策
+            self.prediction = capability.predict(
+                b.name, b.directory, b.api_level, b.eligible, g.name
+            )
+            self._render_prediction(self.prediction)
+
+            self.detail.insert("end", "\n判断依据：\n", "dim")
             for r in b.reasons:
-                tag = "ok" if any(k in r for k in ("d3d12", "D3D12", "dlssg", "DLSS")) else "dim"
+                tag = "dim"
+                if any(k in r for k in ("D3D12（已确认", "dlssg", "DLSS 帧生成")):
+                    tag = "ok"
+                elif r.startswith("（反证）") or "反证" in r:
+                    tag = "dim"
+                elif "仅 D3D11" in r or "Vulkan" in r:
+                    tag = "warn"
                 self.detail.insert("end", f"　· {r}\n", tag)
-            if b.has_dlssg:
-                self.detail.insert("end", "\n　✓ 游戏自带 DLSS 帧生成组件，装上就能在画面设置里打开\n", "ok")
-            else:
-                self.detail.insert("end",
-                    "\n　· 没看到 nvngx_dlssg.dll：仍可安装，但游戏可能不提供帧生成开关\n", "dim")
-            self.detail.insert("end", f"\n　安装目录：{b.directory}\n", "mono")
+            self.detail.insert("end", f"\n安装目录：{b.directory}\n", "mono")
 
         # 反作弊
         self.anticheat = ac.scan(g.root)
@@ -612,6 +792,17 @@ class App(tk.Tk):
         else:
             router = "SM75" if "SM75" in rsel else "SM86"
 
+        # 按路由定 profile —— SM75 只能走 0.2.4
+        prof = profiles.for_router(router)
+
+        # 倍率不能超过该 profile 的上限
+        frames = installer.frame_option_to_value(self.frames_var.get(), 3)
+        frames = max(1, min(prof.max_frames, frames))
+
+        # 入口必须是该 profile 支持的
+        if proxy not in prof.proxy_names:
+            proxy, why = installer.auto_pick_proxy(target_dir, profile=prof)
+
         bilinear = 1 if self.sample_var.get().startswith("性能") else 0
         lsel = self.loglv_var.get()
         if lsel.startswith("关闭"):
@@ -622,7 +813,7 @@ class App(tk.Tk):
             lvl = 3
         else:
             lvl = 1
-        return target_dir, proxy, why, router, bilinear, lvl
+        return target_dir, proxy, why, router, bilinear, lvl, frames
 
     def _preflight_or_none(self, target_dir, proxy, router, quiet=False):
         acr = ac.scan(self.selected.root)
@@ -645,13 +836,20 @@ class App(tk.Tk):
         got = self._collect()
         if not got:
             return
-        target_dir, proxy, why, router, bilinear, lvl = got
+        target_dir, proxy, why, router, bilinear, lvl, frames = got
         pf = self._preflight_or_none(target_dir, proxy, router)
         plan = installer.make_plan(
             target_dir, self.chosen_exe, proxy, router,
-            game_name=self.selected.name, hardware_bilinear=bilinear, log_level=lvl,
+            game_name=self.selected.name, hardware_bilinear=bilinear,
+            max_generated_frames=frames, log_level=lvl,
         )
-        lines = [f"安装目录：{target_dir}", f"代理入口：{proxy}（{why}）", f"计算路由：Router={router}", ""]
+        lines = [
+            f"安装目录：{target_dir}",
+            f"代理入口：{proxy}（{why}）",
+            f"计算路由：Router={router}",
+            f"最高倍率：{self.frames_var.get()}",
+            "",
+        ]
         for it in plan.items:
             act = {installer.ACT_COPY: "写入", installer.ACT_SKIP: "跳过（已一致）",
                    installer.ACT_REMOVE: "删除"}.get(it.action, it.action)
@@ -677,8 +875,23 @@ class App(tk.Tk):
         got = self._collect()
         if not got:
             return
-        target_dir, proxy, why, router, bilinear, lvl = got
+        target_dir, proxy, why, router, bilinear, lvl, frames = got
         pf = self._preflight_or_none(target_dir, proxy, router)
+
+        # 20 系是实验性路由 —— 上游 0.3.0 起明确这么定位，必须先提醒
+        if router == "SM75":
+            if not messagebox.askyesno(
+                "20 系显卡：实验性支持",
+                "RTX 20 系列走的是 SM75 实验性路由。\n\n"
+                "上游从 0.3.0 起把它标注为实验性质，且没有在实体 Turing 显卡上"
+                "完成验证。\n"
+                "可能的症状：画面闪烁、拖影、游戏闪退。\n\n"
+                "（不过 2070 笔记本实测是正常的，所以多数情况下应该没问题）\n\n"
+                "要继续吗？出问题时可以随时「卸载并还原」，不会损坏游戏。",
+                icon="warning",
+            ):
+                self._log("用户取消了安装（20 系实验性提醒）")
+                return
 
         # 帧生成硬性前置条件：HAGS 关闭时游戏一定会说"显卡不支持"
         if self.env is not None and self.env.hags is False:
@@ -693,6 +906,19 @@ class App(tk.Tk):
                 icon="warning",
             ):
                 self.do_enable_hags()
+                return
+
+        # 能力预判：游戏大概率没有帧生成功能时，先问一句值不值得试
+        if self.prediction is not None and self.prediction.level == capability.Support.UNLIKELY:
+            if not messagebox.askyesno(
+                "这个游戏可能没有帧生成功能",
+                f"{self.prediction.headline}\n\n"
+                + "\n".join(self.prediction.reasons)
+                + f"\n\n{self.prediction.advice}\n\n"
+                "还要继续安装吗？",
+                icon="warning",
+            ):
+                self._log("用户取消了安装（游戏可能不支持）")
                 return
 
         if not pf.ok:
@@ -712,7 +938,7 @@ class App(tk.Tk):
                     "你真的要冒险继续吗？",
                     icon="warning", default="no",
                 ):
-                    self._install_now(target_dir, proxy, router, bilinear, lvl, force=True)
+                    self._install_now(target_dir, proxy, router, bilinear, lvl, frames, force=True)
                 return
             messagebox.showerror("预检未通过", detail)
             return
@@ -722,7 +948,8 @@ class App(tk.Tk):
             f"游戏：{self.selected.name}\n"
             f"安装目录：{target_dir}\n"
             f"代理入口：{proxy}（{why}）\n"
-            f"计算路由：Router={router}\n\n"
+            f"计算路由：Router={router}\n"
+            f"最高倍率：{self.frames_var.get()}\n\n"
             "本工具只会在这个目录里写入 2 个文件，覆盖前会先备份原文件。\n"
             "随时可以点「卸载并还原」恢复原状。\n"
         )
@@ -732,13 +959,14 @@ class App(tk.Tk):
         if not messagebox.askyesno("确认安装", msg):
             self._log("用户取消了安装")
             return
-        self._install_now(target_dir, proxy, router, bilinear, lvl)
+        self._install_now(target_dir, proxy, router, bilinear, lvl, frames)
 
-    def _install_now(self, target_dir, proxy, router, bilinear, lvl, force=False):
+    def _install_now(self, target_dir, proxy, router, bilinear, lvl, frames=3, force=False):
         def work():
             plan = installer.make_plan(
                 target_dir, self.chosen_exe, proxy, router,
-                game_name=self.selected.name, hardware_bilinear=bilinear, log_level=lvl,
+                game_name=self.selected.name, hardware_bilinear=bilinear,
+                max_generated_frames=frames, log_level=lvl,
             )
             return installer.execute_plan(plan)
 
