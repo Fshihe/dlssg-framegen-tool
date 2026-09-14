@@ -1171,12 +1171,40 @@ class Check:
     detail: str = ""
 
 
+def _game_has_framegen(target_dir: Path) -> tuple[bool, str]:
+    """目标游戏有没有 DLSSG（Streamline）组件。
+
+    有组件只代表"技术上支持"，不代表游戏把开关放出来了 —— 所以调用方
+    依然要提醒用户去游戏里真的打开帧生成。
+    """
+    try:
+        from . import capability
+
+        comps = capability._find_components(Path(target_dir))
+    except Exception:
+        comps = []
+
+    got = [c for c in (comps or []) if "dlssg" in str(c).lower() or "dlss_g" in str(c).lower()]
+    if got:
+        return True, "、".join(str(g) for g in got[:3])
+
+    # 退一步：直接看目录里有没有 nvngx_dlssg.dll / sl.dlss_g.dll
+    for pat in ("nvngx_dlssg.dll", "sl.dlss_g.dll"):
+        try:
+            if any(Path(target_dir).rglob(pat)):
+                return True, pat
+        except OSError:
+            pass
+    return False, ""
+
+
 def preflight(
     target_dir: str | Path,
     bundle: str,
     multiplier: int = 4,
     running_names: list[str] | None = None,
     anticheat=None,
+    fg_input: str = "upscaler",
 ) -> list[Check]:
     """OptiScaler 引擎的安装前预检。有任何 error 就不该继续。"""
     from .state import ENGINE_OPTISCALER, conflict_message, other_engine_install
@@ -1191,13 +1219,48 @@ def preflight(
     if not target_dir.is_dir():
         return [Check("error", "目标目录不存在", str(target_dir))]
 
-    # 1) 引擎互斥 —— 这条最要紧，放最前面
+    # 0) 稳定性总提醒 —— 放在最前面，因为它比其他任何一条都重要
+    out.append(Check(
+        "warn", "本引擎可能导致游戏起不来",
+        "OptiScaler 会钩住 D3D12 与交换链，兼容性完全取决于具体游戏 ——\n"
+        "黑神话基准测试实测出现过「打开就闪退」。\n\n"
+        "出问题直接卸载即可还原，游戏文件本身不会被改动。",
+    ))
+
+    # 1) 引擎互斥 —— 这条最要紧
     other = other_engine_install(target_dir, ENGINE_OPTISCALER)
     if other:
         out.append(Check("error", "该目录已安装另一个引擎",
                          conflict_message(other, ENGINE_OPTISCALER)))
     else:
         out.append(Check("ok", "没有与本引擎冲突的安装", "同一目录只允许一个帧生成引擎"))
+
+    # 1.5) FGInput=dlssg 的前置条件。
+    #      这是踩过的坑：把输入源指到游戏自身的 DLSSG 通道，但如果游戏里
+    #      没有开启 DLSS 帧生成，那条通道根本不会被调用
+    #      （日志里是 Ignoring plugin 'sl.dlss_g' since it was not requested by the host），
+    #      OptiScaler 就处在一个"配置要求了但输入不存在"的状态。
+    #      黑神话上这么装之后，游戏直接闪退。
+    if (fg_input or "").lower() == "dlssg":
+        has_fg, why = _game_has_framegen(target_dir)
+        if has_fg:
+            out.append(Check(
+                "warn", "FGInput=dlssg：必须先在游戏里打开「帧生成」",
+                "这个输入源取的是游戏自身 DLSSG（Streamline）通道的数据。\n"
+                "如果画面设置里没有开启帧生成，那条通道就不会被调用，\n"
+                f"OptiScaler 会停在无效状态（已找到：{why}）。\n\n"
+                "实测这个无效状态会让游戏闪退。请先在游戏里打开帧生成再装。",
+            ))
+        else:
+            out.append(Check(
+                "error", "FGInput=dlssg 风险过高：附近没找到 DLSSG 组件",
+                "在游戏主程序附近没找到 nvngx_dlssg.dll / sl.dlss_g.dll。\n"
+                "组件也可能装在别的子目录（比如 UE 的 Engine\\Plugins），\n"
+                "本工具只扫了主程序附近，所以这不等于游戏一定没有。\n\n"
+                "但把输入源指向一个可能不存在、且需要游戏内开关才会激活的通道，\n"
+                "实测会让游戏直接闪退。**请改用 FGInput=upscaler。**\n"
+                "确实要用 dlssg 的话，请先确认游戏里已开启帧生成。",
+            ))
 
     # 2) 外来 Mod
     from .installer import foreign_mods

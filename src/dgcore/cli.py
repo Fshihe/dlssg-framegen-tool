@@ -260,7 +260,8 @@ def _oi_check(args, root, exe, tdir: Path) -> int:
     acr = ac.scan(root)
     checks = optiscaler.preflight(tdir, bundle, _oi_mult(args),
                                   running_names=[Path(exe).name] if exe else [],
-                                  anticheat=acr)
+                                  anticheat=acr,
+                                  fg_input=getattr(args, "fg_input", "upscaler"))
     _print_oi_checks(checks)
     ok = not any(c.level == "error" for c in checks)
     out("")
@@ -312,7 +313,8 @@ def _oi_install(args, root, exe, tdir: Path) -> int:
     acr = ac.scan(root)
     checks = optiscaler.preflight(tdir, bundle, mult,
                                   running_names=[Path(exe).name] if exe else [],
-                                  anticheat=acr)
+                                  anticheat=acr,
+                                  fg_input=getattr(args, "fg_input", "upscaler"))
     out("")
     _print_oi_checks(checks)
     errors = [c for c in checks if c.level == "error"]

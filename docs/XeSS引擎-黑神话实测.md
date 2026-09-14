@@ -103,15 +103,62 @@ trial-HighResMV=true.log    Activate 0 次  → 报错 0      （假通过）
 - 游戏目录里的 `D3D12\D3D12Core.dll` 是游戏自带的，与本工具的
   `D3D12_Optiscaler\` 不冲突（目录名不同，安装前已核对）。
 
-## 5. 还没试过的方向
+## 5. 闪退：`FGInput=dlssg` 把游戏弄挂了
 
-`FGInput=dlssg` —— 改走游戏自身的 Streamline 通道取输入，
-而不是从超分那里取。理论上 DLSSG 的输入是引擎按帧生成要求生成的、
-尺寸应当对齐，可能绕开这个不匹配。
+在 XeFG 失败之后，我换了个思路试 `FGInput=dlssg`（改走游戏自身的 Streamline
+通道取输入）。结果**游戏打开就闪退**。
 
-已留在工具里（`--fg-input dlssg`），但**未经验证**，需要实际跑一次才知道。
+崩溃日志（硬崩，最后一行之后直接断掉，没有任何 `[E]`）：
 
-## 6. 清理
+```
+[01:32:36] [W] hkD3D12CreateDevice D3D12Device created with non-primary GPU   ×3
+[01:32:38] [W] streamlineLogCallback Ignoring plugin 'sl.dlss_g'
+               since it is was not requested by the host
+[01:32:40] [W] FGHooks::hkResizeBuffers SwapChainFlags changed from 842 to 802
+[01:32:40] [W] FGHooks::hkResizeBuffers Preventing flag change for XeFG!
+[01:32:44] [I] DLSSFeatureDx12::InitDLSS _CreateFeature result: NVSDK_NGX_Result_Success
+[01:32:45] [W] OptiInput::ValidateWindowSubclassLocked subclass lost to another WndProc
+[01:32:47] [W] OptiInput::LogInputHealthSnapshotLatch ...
+<日志到此为止>
+```
+
+**根因（我造成的）**：那行 `Ignoring plugin 'sl.dlss_g' since it was not requested
+by the host` 说明游戏**没有开启 DLSS 帧生成**，那条 Streamline 通道从未被调用。
+我把输入源指向了它，OptiScaler 就停在"配置要求了但输入不存在"的状态。
+
+时间线也对得上：
+
+| 时刻 | 配置 | 结果 |
+|---|---|---|
+| 01:15 | `FGInput=upscaler` | 游戏正常启动（只是 FG 不出帧） |
+| 01:25 | 我改成 `FGInput=dlssg` | — |
+| 01:32 | 同上 | **闪退** |
+
+两个次要加强因素：
+- `D3D12Device created with non-primary GPU` —— 这台机器装了两个虚拟显示器
+  适配器（GameViewer、OrayIddDriver），OptiScaler 挑适配器时可能没挑到独显。
+- `Preventing flag change for XeFG!` —— OptiScaler 在强行改交换链标志位。
+
+**已卸载还原，游戏恢复正常**（实测启动后稳定运行 40 秒以上，7 个游戏自带文件
+与最早快照逐字节一致，0 处改动）。
+
+**工具侧已加防护**：选 `--fg-input dlssg` 时预检会检查游戏有没有 DLSSG 组件，
+没有就**直接报错拦住**；有则警告"必须先在游戏里打开帧生成"。
+另外整个引擎都加了一条"可能导致游戏起不来"的前置提醒。
+
+## 6. 还没试过的方向（已降级为不建议）
+
+`FGInput=dlssg` 的正确测试方式需要一个我做不到的前置条件：**先在游戏画面设置里
+打开「帧生成」**，那条 Streamline 通道才会被调用。
+
+但考虑到：
+- 即使输入对齐，`Requires disabling dilated motion vectors` 这道坎还在
+- 这条路径已经实机闪退过一次
+- 每次测试都要完整跑一遍基准测试
+
+**不建议继续试。** 黑神话这边用回引擎一（DLSSG）即可。
+
+## 7. 清理
 
 工具装的 11 个文件 + 生成的两个空目录 + 运行产生的 `OptiScaler.log`
 都会被 `uninstall` 一次清掉并复核；游戏自带文件一个不动。

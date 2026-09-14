@@ -1003,6 +1003,7 @@ class App(tk.Tk):
             target_dir, bundle, self._current_multiplier(),
             running_names=[self.chosen_exe.name] if self.chosen_exe else [],
             anticheat=acr,
+            fg_input="upscaler",
         )
         if not quiet:
             self._log("—" * 30)
