@@ -1094,19 +1094,27 @@ def run(verbose: bool = True) -> Runner:
         r.check("OptiScaler INI：DLSS 5 包打开 DlssNr.Enabled",
                 _section_has(ini5, "DlssNr", "Enabled", "true"), "")
 
-        # 19b-2. HighResMV / 日志开关
-        #   黑神话实测：不设 HighResMV 时 XeFG 每帧都因
-        #   "motion vector and depth resource resolutions must match" 失败，
-        #   帧生成完全不生效。所以默认必须是 true。
-        r.check("OptiScaler INI：默认 HighResMV=true（黑神话必需）",
-                _section_has(ini_txt, "XeFG", "HighResMV", "true"), "")
-        r.check("OptiScaler INI：可显式关掉 HighResMV",
+        # 19b-2. HighResMV / 帧生成输入源 / 日志开关
+        #   关于 HighResMV 的教训：一度把它默认设成 true，理由是"黑神话实测 0 报错"。
+        #   后来发现那两次试验里 XeFG **从未激活**（日志里没有 Activate 行），
+        #   0 报错只是"什么都没发生"——是假通过。真实运行是每帧一错。
+        #   既然没有证据支持 true，就不该替用户覆盖上游默认值。
+        r.check("OptiScaler INI：默认不覆盖 HighResMV（无证据就不改上游值）",
+                "HighResMV=true" not in ini_txt and "HighResMV=false" not in ini_txt, "")
+        r.check("OptiScaler INI：可显式打开 HighResMV",
+                _section_has(oi.build_ini("optiscaler-xess", 4, high_res_mv=True),
+                             "XeFG", "HighResMV", "true"), "")
+        r.check("OptiScaler INI：可显式关闭 HighResMV",
                 _section_has(oi.build_ini("optiscaler-xess", 4, high_res_mv=False),
                              "XeFG", "HighResMV", "false"), "")
-        r.check("OptiScaler INI：high_res_mv=None 时不覆盖上游默认",
-                "HighResMV=true" not in oi.build_ini("optiscaler-xess", 4, high_res_mv=None)
-                and "HighResMV=false" not in oi.build_ini("optiscaler-xess", 4, high_res_mv=None),
-                "")
+        r.check("OptiScaler INI：默认 FGInput=upscaler",
+                _section_has(ini_txt, "FrameGen", "FGInput", "upscaler"), "")
+        r.check("OptiScaler INI：可切到 FGInput=dlssg",
+                _section_has(oi.build_ini("optiscaler-xess", 4, fg_input="dlssg"),
+                             "FrameGen", "FGInput", "dlssg"), "")
+        r.check("OptiScaler INI：非法 FGInput 回落到 upscaler",
+                _section_has(oi.build_ini("optiscaler-xess", 4, fg_input="乱写"),
+                             "FrameGen", "FGInput", "upscaler"), "")
         r.check("OptiScaler INI：默认打开日志（便于排查「没效果」）",
                 _section_has(ini_txt, "Log", "LogToFile", "true"), "")
         r.check("OptiScaler INI：log_level=None 时不打开日志",

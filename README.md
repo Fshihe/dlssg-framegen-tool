@@ -81,19 +81,21 @@
 XeSS 引擎默认会把日志写在游戏目录下的 `OptiScaler.log`。
 **如果感觉帧数没变，先看这个文件里有没有 `[E]` 开头的行。**
 
-已知的一个坑：XeFG 要求运动矢量和深度缓冲的**分辨率一致**，
-但很多 UE5 游戏（黑神话就是）深度在渲染分辨率、MV 在显示分辨率，
-默认配置下每一帧都会失败，日志里刷满：
+已知的一个硬伤：XeFG 要求运动矢量和深度缓冲**分辨率一致**，
+而黑神话用的是 dilated motion vectors，XeFG 不接受，
+每一帧都会失败，日志里刷满：
 
 ```
 [E] XeFG Log: XeFG: Invalid argument. motion vector and depth resource resolutions must match.
 ```
 
-工具里那个「运动矢量按高分辨率处理（HighResMV）」勾选框就是治这个的，**默认已经开着了**。
-实测黑神话：关掉是 3694 次报错、帧生成完全不生效；开着是 0 报错、正常出帧。
+OptiScaler 自己的界面上也写着 **「Requires disabling dilated motion vectors」**。
+所以**黑神话上 XeSS 帧生成是不通的**，不是设置问题。
+详见 `docs/XeSS引擎-黑神话实测.md`。
 
-如果换个游戏反而不正常，可以把它关掉试试 —— 这个开关没有一个通吃的值，
-取决于游戏把 MV 放在哪个分辨率。
+试过但没用：`HighResMV` 开与不开都一样失败（3694 / 6781 次报错），
+所以工具不再覆盖这个值。还没试过的是把 `--fg-input` 换成 `dlssg`
+（改走游戏自身的 Streamline 通道取输入），欢迎反馈结果。
 
 ### 关于 XeSS 引擎包的来源
 

@@ -233,7 +233,7 @@ def _oi_mult(args) -> int:
 
 def _oi_hires_mv(args):
     """把 --high-res-mv 的三态映射成 build_ini 要的 True/False/None。"""
-    v = (getattr(args, "high_res_mv", "on") or "on").lower()
+    v = (getattr(args, "high_res_mv", "auto") or "auto").lower()
     if v == "auto":
         return None
     return v != "off"
@@ -272,7 +272,8 @@ def _oi_plan(args, root, exe, tdir: Path) -> int:
     bundle = _oi_bundle(args)
     mult = _oi_mult(args)
     plan = optiscaler.make_plan(tdir, exe, bundle, mult, game_name=root.name,
-                                high_res_mv=_oi_hires_mv(args))
+                                high_res_mv=_oi_hires_mv(args),
+                                fg_input=getattr(args, "fg_input", "upscaler"))
     _hdr("将要执行的改动（预演，不会真的写入）")
     out(f"引擎包：{optiscaler.get_bundle(bundle).display_name}")
     out(f"倍率  ：{mult}X（{optiscaler.multiplier_label(mult)}）")
@@ -336,7 +337,8 @@ def _oi_install(args, root, exe, tdir: Path) -> int:
             return 1
 
     res = optiscaler.install(tdir, exe, bundle, mult, game_name=root.name,
-                             high_res_mv=_oi_hires_mv(args))
+                             high_res_mv=_oi_hires_mv(args),
+                             fg_input=getattr(args, "fg_input", "upscaler"))
     out("")
     if not res.success:
         out(res.message)
@@ -678,9 +680,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="optiscaler 引擎的引擎包（默认 xess）")
         sp.add_argument("--multiplier", type=int, default=4,
                         help="optiscaler 引擎的帧生成倍率 2/3/4/5/6（默认 4）")
-        sp.add_argument("--high-res-mv", default="on", choices=["on", "off", "auto"],
-                        help="XeFG 运动矢量按高分辨率处理。黑神话这类 UE5 游戏必须 on "
-                             "（默认 on）；auto 表示不覆盖上游默认值")
+        sp.add_argument("--high-res-mv", default="auto", choices=["on", "off", "auto"],
+                        help="XeFG 运动矢量按高分辨率处理（默认 auto = 不改上游值）")
+        sp.add_argument("--fg-input", default="upscaler",
+                        choices=["upscaler", "dlssg", "fsrfg"],
+                        help="帧生成输入源：upscaler（游戏超分，默认）"
+                             "或 dlssg（游戏自带 DLSSG/Streamline）")
 
     sp = sub.add_parser("detect", help="检测显卡与系统环境")
     sp.add_argument("--json", action="store_true")

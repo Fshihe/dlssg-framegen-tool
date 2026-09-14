@@ -246,9 +246,9 @@ class App(tk.Tk):
 
         # 运动矢量分辨率：OptiScaler 引擎专有。默认开着 —— 实测黑神话这类 UE5
         # 游戏不设它的话，XeFG 每帧都因 MV/深度分辨率不匹配而失败（表现为"没效果"）。
-        self.hiresmv_var = tk.BooleanVar(value=True)
+        self.hiresmv_var = tk.BooleanVar(value=False)
         self.hiresmv_check = ttk.Checkbutton(
-            opt, text="运动矢量按高分辨率处理（HighResMV，XeSS 引擎专用，黑神话等 UE5 游戏必须开）",
+            opt, text="运动矢量按高分辨率处理（HighResMV，默认不改；画面异常时可试）",
             variable=self.hiresmv_var,
         )
         self.hiresmv_check.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))

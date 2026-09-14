@@ -314,7 +314,8 @@ def normalize_multiplier(mult: int) -> int:
 
 
 def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
-              log_level: int | None = 2, high_res_mv: bool | None = True) -> str:
+              log_level: int | None = 2, high_res_mv: bool | None = None,
+              fg_input: str = "upscaler") -> str:
     """生成 OptiScaler.ini：模板 + 定点修改 + 我们自己的署名头。
 
     log_level:
@@ -322,19 +323,21 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
         None  → 不打开文件日志（跟随上游默认 false）
 
     high_res_mv:
-        True  → XeFG.HighResMV=true
-        False → XeFG.HighResMV=false
-        None  → 不覆盖（跟随上游 auto）
+        True / False → 显式设定 XeFG.HighResMV
+        None         → 不覆盖，跟随上游 auto（默认）
 
-    为什么要显式设 HighResMV：XeFG 要求运动矢量与深度缓冲的**分辨率一致**。
-    UE5 游戏（黑神话就是）常见的情况是深度在渲染分辨率、而 MV 在显示分辨率，
-    上游默认的 auto 解析成 false，于是每一帧都报
-    "motion vector and depth resource resolutions must match"，
-    帧生成完全不生效 —— 而且不报错给用户看，只是"没效果"。
+        留成 None 是**基于实测的谨慎**：黑神话上无论 auto 还是 true 都失败
+        （auto 3694 次报错 / true 6781 次报错，都是每帧一错），
+        没有任何证据表明 true 更好。既然没证据，就不该替用户改上游默认值。
+        这个开关留给别的游戏试 —— 取决于游戏把 MV 放在哪个分辨率。
 
-    实测（黑神话基准测试，2560x1440 / 渲染 1708x964）：
-        HighResMV=auto/false → 3694 次分辨率不匹配报错，帧生成无效
-        HighResMV=true       → 0 报错，XeFG 正常建立并工作
+    fg_input:
+        "upscaler" → 用游戏超分的输入（不要求游戏自带帧生成）
+        "dlssg"    → 用游戏自身 DLSSG（Streamline）的输入
+
+        黑神话在 upscaler 模式下每帧都失败（MV/深度分辨率不匹配），
+        dlssg 模式改走游戏自己的 Streamline 通道，输入由引擎生成、
+        尺寸是对齐的，是下一个值得试的方向。
     """
     spec = get_bundle(key)
     if spec is None:
@@ -350,9 +353,12 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
     interp = mult - 1                     # 插值帧数 = 倍率 - 1
     unlock = mult > UNLOCK_ABOVE
 
-    # 帧生成：输入用超分（不要求游戏自带 DLSSG），输出用 XeSS 帧生成
+    # 帧生成：输入按参数选，输出固定用 XeSS 帧生成
+    fg_in = (fg_input or "upscaler").strip()
+    if fg_in.lower() not in ("upscaler", "dlssg", "fsrfg", "nukems", "fsrfg30"):
+        fg_in = "upscaler"
     text = _set_in_section(text, "FrameGen", "Enabled", "true")
-    text = _set_in_section(text, "FrameGen", "FGInput", "upscaler")
+    text = _set_in_section(text, "FrameGen", "FGInput", fg_in)
     text = _set_in_section(text, "FrameGen", "FGOutput", "xefg")
     text = _set_in_section(text, "FrameGen", "FGNvngxReplacement", "None")
 
@@ -361,7 +367,7 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
     text = _set_in_section(text, "XeFG", "UnlockMFG", "true" if unlock else "false")
     text = _set_in_section(text, "XeFG", "MaxInterpolatedFrames", str(interp))
 
-    # 运动矢量分辨率（见上面 docstring：不设的话黑神话这类游戏完全不生效）
+    # 运动矢量分辨率：默认不动（见 docstring）
     if high_res_mv is not None:
         text = _set_in_section(text, "XeFG", "HighResMV", "true" if high_res_mv else "false")
 
@@ -665,7 +671,8 @@ def make_plan(
     multiplier: int = 4,
     game_name: str = "",
     prev_proxy: str = "",
-    high_res_mv: bool | None = True,
+    high_res_mv: bool | None = None,
+    fg_input: str = "upscaler",
 ) -> OptiPlan:
     target_dir = Path(target_dir)
     spec = get_bundle(bundle)
@@ -674,7 +681,7 @@ def make_plan(
 
     proxy, _why = pick_proxy(target_dir, bundle, prev_proxy)
     mult = normalize_multiplier(multiplier)
-    ini_text = build_ini(bundle, mult, high_res_mv=high_res_mv)
+    ini_text = build_ini(bundle, mult, high_res_mv=high_res_mv, fg_input=fg_input)
 
     plan = OptiPlan(
         target_dir=target_dir,
@@ -1292,7 +1299,8 @@ def install(
     multiplier: int = 4,
     game_name: str = "",
     dry_run: bool = False,
-    high_res_mv: bool | None = True,
+    high_res_mv: bool | None = None,
+    fg_input: str = "upscaler",
 ) -> OptiResult:
     """完整安装流程：读状态 -> 生成计划 -> 执行 -> 记录。"""
     from .state import ENGINE_OPTISCALER, engine_of, find_install, record_install
@@ -1313,6 +1321,7 @@ def install(
         game_name=game_name,
         prev_proxy=prev_proxy,
         high_res_mv=high_res_mv,
+        fg_input=fg_input,
     )
 
     if dry_run:
@@ -1331,6 +1340,7 @@ def install(
         "exe": str(exe_path) if exe_path else "",
         "bundle": bundle,
         "multiplier": normalize_multiplier(multiplier),
+        "fg_input": fg_input,
         "proxy": plan.proxy,
         "files": [
             {"name": rel, "sha256": try_hash(target_dir / rel)}
