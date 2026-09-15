@@ -14,10 +14,11 @@ import sys
 import threading
 import tkinter as tk
 import traceback
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import APP_NAME, UPSTREAM_REPO, UPSTREAM_VERSION, VERSION
+from . import APP_NAME, TECH_SOURCES, UPSTREAM_REPO, UPSTREAM_VERSION, VERSION
 from . import anticheat as ac
 from . import games, gpu, installer, optiscaler, state, winenv
 from . import capability
@@ -147,13 +148,15 @@ class App(tk.Tk):
         root.rowconfigure(1, weight=1)
 
         # ---------------- 标题 ----------------
+        # 标题走 APP_NAME，不要再硬编码一份 —— 之前改名时这里漏了，
+        # 窗口标题变了而界面上那行大字没变。
         head = ttk.Frame(root)
         head.grid(row=0, column=0, sticky="ew")
         head.columnconfigure(0, weight=1)
-        ttk.Label(head, text="DLSS 帧生成 一键开启工具", font=FONT_T).grid(row=0, column=0, sticky="w")
+        ttk.Label(head, text=APP_NAME, font=FONT_T).grid(row=0, column=0, sticky="w")
         ttk.Label(
             head,
-            text=f"适用 RTX 20 / 30 系列 · 上游 DLSSG Native {UPSTREAM_VERSION}",
+            text=f"v{VERSION} · DLSSG 引擎上游 {UPSTREAM_VERSION}",
             font=FONT, foreground=C_DIM,
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
@@ -416,6 +419,23 @@ class App(tk.Tk):
         self.dlss5_note.grid(row=0, column=0, sticky="ew")
         self.dlss5_warn.bind("<Configure>", self._on_wrap)
         self.dlss5_warn.grid_remove()
+
+        # ---------------- 技术来源 ----------------
+        # 两个引擎各自来自别人的工作，摆在这里便于核对与致谢。
+        # 链接可点（webbrowser 是标准库，不引入新依赖）。
+        src = ttk.LabelFrame(tab_adv, text=" 技术来源 ", padding=10)
+        src.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        src.columnconfigure(0, weight=1)
+
+        for _i, (_name, _url) in enumerate(TECH_SOURCES):
+            _row = ttk.Frame(src)
+            _row.grid(row=_i, column=0, sticky="ew", pady=(0, 4))
+            _row.columnconfigure(1, weight=1)
+            ttk.Label(_row, text=_name + "：", font=FONT).grid(row=0, column=0, sticky="w")
+            _link = tk.Label(_row, text=_url, font=FONT, fg="#0969da",
+                             cursor="hand2", anchor="w")
+            _link.grid(row=0, column=1, sticky="ew")
+            _link.bind("<Button-1>", lambda _e, u=_url: self._open_url(u))
 
         # ---------------- 操作按钮（属于「游戏与安装」页） ----------------
         act = ttk.Frame(tab_game)
@@ -742,6 +762,13 @@ class App(tk.Tk):
                 self.dlss5_note.configure(wraplength=w)
             except tk.TclError:
                 pass
+
+    def _open_url(self, url: str) -> None:
+        """用系统默认浏览器打开链接。打不开也不该让界面崩。"""
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            self._log(f"打不开链接 {url}：{exc}", "err")
 
     def _on_frames_change(self, _evt=None) -> None:
         """倍率变了 → 刷新说明文字。"""

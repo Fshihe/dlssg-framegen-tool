@@ -43,6 +43,25 @@ UPSTREAM_NAME = "DLSSG Native"
 UPSTREAM_VERSION = "0.2.4"
 UPSTREAM_REPO = "https://github.com/sdli1995/dlssg_for_sm86"
 
+# 本工具自己的仓库
+SELF_REPO = "https://github.com/Fshihe/dlssg-framegen-tool"
+
+# XeSS 引擎（OptiScaler）的公开来源。
+# 我们用的引擎包是第三方整合构建（署名见 payload 基线的 source_archive），
+# 这里只列**可核实的**上游：OptiScaler 本体与 Intel 的 XeSS SDK。
+# 整合包作者没有可核实的公开仓库地址，因此不列 —— 不编造链接。
+XESS_SOURCES = (
+    ("OptiScaler 本体（XeSS 帧生成的宿主）", "https://github.com/optiscaler/OptiScaler"),
+    ("Intel XeSS SDK（libxess_fg / libxell）", "https://github.com/intel/xess"),
+)
+
+# 「高级」页「技术来源」区要展示的链接
+TECH_SOURCES = (
+    ("DLSSG 引擎", UPSTREAM_REPO),
+    *XESS_SOURCES,
+    ("本工具", SELF_REPO),
+)
+
 # 我们落盘的两个文件名
 INI_NAME = "dlssg_sm86.ini"
 
@@ -64,6 +83,9 @@ __all__ = [
     "UPSTREAM_NAME",
     "UPSTREAM_VERSION",
     "UPSTREAM_REPO",
+    "SELF_REPO",
+    "XESS_SOURCES",
+    "TECH_SOURCES",
     "INI_NAME",
     "PROXY_ENTRIES",
     "DEFAULT_PROXY",
