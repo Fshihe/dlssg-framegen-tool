@@ -188,24 +188,30 @@ def describe_all() -> str:
 # INI 生成（每个 profile 一套）
 # --------------------------------------------------------------------------
 
-TOOL_NAME_LINE = "; 由 DLSSG 帧生成一键开启工具生成"
+TOOL_NAME_LINE = "; 由 帧生成解锁工具 生成"
 
 # 识别"这份 INI 是不是本工具写的"的稳定标记。
 #
-# 曾经踩过的坑：生成时写的是「DLSSG 帧生成一键开启工具」，但识别时
-# 用的字符串漏了「帧生成」两个字，导致防护失效 —— 卸载时把工具自己
-# 生成的 ini 当成"用户的原始文件"又还原回了游戏目录。
+# 曾经踩过的坑：生成时写的和识别时用的字符串不一致，导致防护失效 ——
+# 卸载时把工具自己生成的 ini 当成"用户的原始文件"又还原回了游戏目录。
 #
-# 现在两边共用这一个常量，不会再漂移。检测时用宽松匹配（不含版本号
-# 等易变部分），只要带工具署名就算我们的。
-OUR_INI_MARKER = "DLSSG 帧生成一键开启工具"
+# 现在两边共用这一个常量。检测时**同时认新旧两个标记**：
+# 工具以前叫「DLSSG 帧生成一键开启工具」，那个名字已经写进了用户机器上
+# 现存安装的 ini 里。只认新标记的话，那些旧安装会被当成外来文件 ——
+# 卸载时既不敢删、也认不出来，直接留下残留。所以旧标记必须一直留着。
+OUR_INI_MARKER = "帧生成解锁工具"
+LEGACY_INI_MARKERS = (
+    "DLSSG 帧生成一键开启工具",   # 1.2.1 及更早
+)
 
 
 def is_our_ini(text: str) -> bool:
-    """判断一段 INI 内容是不是本工具生成的。"""
+    """判断一段 INI 内容是不是本工具生成的（含旧版本署名）。"""
     if not text:
         return False
-    return OUR_INI_MARKER in text or TOOL_NAME_LINE in text
+    if OUR_INI_MARKER in text or TOOL_NAME_LINE in text:
+        return True
+    return any(m in text for m in LEGACY_INI_MARKERS)
 
 
 def build_ini(
@@ -332,4 +338,5 @@ __all__ = [
     "is_our_ini",
     "TOOL_NAME_LINE",
     "OUR_INI_MARKER",
+    "LEGACY_INI_MARKERS",
 ]

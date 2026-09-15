@@ -1,6 +1,7 @@
-# DLSSG 帧生成一键开启工具
+# 帧生成解锁工具
 
-给 RTX 20/30 系显卡开 DLSS 帧生成的小工具。单个 exe，不用装 Python，不用联网。
+给显卡开帧生成的工具，带两个引擎：DLSSG（NVIDIA DLSS 帧生成）与 XeSS（OptiScaler）。
+单个 exe，不用装 Python，不用联网。
 
 底层是 [sdli1995/dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm86)，我这里只是做了个壳。
 
@@ -181,7 +182,7 @@ Intel XeSS SDK 的许可禁止逆向与「运行时修改」，DLSS 5 那份模�
 还不行就取个证，命令行跑：
 
 ```
-dlssg-cn.exe collect "游戏目录"
+framegen-unlock.exe collect "游戏目录"
 ```
 
 诊断包会生成在 `%LOCALAPPDATA%\DLSSG-SM86-Tool\reports\`，
@@ -260,19 +261,20 @@ dll 带自签名证书，可以在文件属性 →「数字签名」里看到。
 同一个 exe 也能当命令行用：
 
 ```
-dlssg-cn.exe detect                看显卡环境
-dlssg-cn.exe list --d3d12          列出能装的游戏
-dlssg-cn.exe check "<目录>"        安装前预检
-dlssg-cn.exe plan "<目录>"         预演，不写入
-dlssg-cn.exe install "<目录>" -y   安装
-dlssg-cn.exe uninstall "<目录>"    卸载
-dlssg-cn.exe hags                  查硬件加速GPU计划
-dlssg-cn.exe collect "<目录>"      收集诊断包
-dlssg-cn.exe selftest              自检（132 项）
+framegen-unlock.exe detect                看显卡环境
+framegen-unlock.exe list --d3d12          列出能装的游戏
+framegen-unlock.exe check "<目录>"        安装前预检
+framegen-unlock.exe plan "<目录>"         预演，不写入
+framegen-unlock.exe install "<目录>" -y   安装
+framegen-unlock.exe uninstall "<目录>"    卸载
+framegen-unlock.exe hags                  查硬件加速GPU计划
+framegen-unlock.exe collect "<目录>"      收集诊断包
+framegen-unlock.exe selftest              自检
 ```
 
 常用参数：`--router SM86|SM75`、`--upstream 0.2.4|0.3.0`、`--frames 1..5`、
-`--proxy winmm.dll`、`--log-level 0..3`、`--dry-run`。
+`--proxy winmm.dll`、`--log-level 0..3`、`--dry-run`、`--engine dlssg|optiscaler`、
+`--bundle optiscaler-xess|optiscaler-dlss5`、`--coexist`、`--no-fg`、`--fg-input auto|upscaler|dlssg`。
 
 倍率参数对应关系：0.3.0 下 5=6X、3=4X；0.2.4 下 3=4X、1=2X。
 

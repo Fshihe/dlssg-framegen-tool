@@ -21,6 +21,7 @@ from . import anticheat as ac
 from . import capability
 from . import games, gpu, installer, pe, proc
 from . import gfxapi
+from . import optiscaler
 from . import profiles
 from .installer import MANIFEST
 
@@ -334,24 +335,26 @@ def run(verbose: bool = True) -> Runner:
 
         # 倍率上限这个坑（真实反馈：选了 4X 但只有 2 倍效果，
         # 因为黑神话的帧生成只有「开/关」，游戏固定请求 1 帧）
+        # 现在只把「该游戏不请求额外倍率」作为一条事实列出来，
+        # 不再展开解释"为什么倍率没生效"（用户要求删掉那类叙述）。
         (_capdir / "sl.dlss_g.dll").write_bytes(b"x")
         cp5 = capability.predict(
             "b1-Win64-Shipping.exe", _capdir, "confirmed", True, "Black Myth: Wukong"
         )
         r.check(
-            "预判：黑神话会被标注「只有开/关、固定 2X」",
-            "开/关" in cp5.headline,
-            cp5.headline,
+            "预判：黑神话仍判为可开（组件齐全）",
+            cp5.level == capability.Support.GOOD,
+            cp5.level.value,
         )
         r.check(
-            "预判：说明里指出游戏不请求额外倍率",
-            "不请求额外倍率" in cp5.advice and "2X" in cp5.advice,
-            cp5.advice,
+            "预判：指出该游戏不请求额外倍率",
+            any("不请求额外倍率" in x for x in cp5.reasons),
+            str(cp5.reasons),
         )
         cp6 = capability.predict("SomeGame-Win64-Shipping.exe", _capdir, "confirmed", True)
         r.check(
-            "预判：其他游戏给出通用的倍率说明",
-            "上限" in cp6.advice and "由游戏请求决定" in cp6.advice,
+            "预判：说明只讲通道的启用条件，不解释倍率为何没生效",
+            "取决于游戏自身的开关" in cp6.advice and "上限" not in cp6.advice,
             cp6.advice,
         )
 
@@ -1008,6 +1011,17 @@ def run(verbose: bool = True) -> Runner:
         r.check("INI 标记：非本工具的 INI 不会被误认",
                 not profiles.is_our_ini("[Compatibility]\nRouter=SM86\n"))
         r.check("INI 标记：空内容不会被误认", not profiles.is_our_ini(""))
+
+        # 工具改过名（旧名「DLSSG 帧生成一键开启工具」）。改名前的安装还留在
+        # 用户机器上，旧署名必须继续被认出来 —— 否则那些安装会被当成外来文件，
+        # 卸载时既不敢删也认不出，直接留下残留。
+        for _mark in profiles.LEGACY_INI_MARKERS:
+            r.check(f"INI 标记：旧署名「{_mark}」仍被认出",
+                    profiles.is_our_ini(f"; 由 {_mark}生成\n[General]\nEnabled=1\n"))
+            r.check(f"OptiScaler：旧署名「{_mark}」仍被认出",
+                    optiscaler.is_our_ini(f"; {_mark}（OptiScaler 引擎）\n"))
+        r.check("INI 标记：新署名同时有效",
+                profiles.is_our_ini(f"; 由 {profiles.OUR_INI_MARKER} 生成\n"))
 
         # 端到端：先装一次（产生一份"我们自己的 ini"），卸载后目录必须干净
         gdirK = tmp / "GameK"

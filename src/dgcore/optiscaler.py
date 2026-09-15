@@ -39,7 +39,7 @@ from pathlib import Path
 from . import proc
 from .optiscaler_bundles import BUNDLES, GENERATED_AT
 from .paths import backups_root, journal, log, payload_base
-from .profiles import OUR_INI_MARKER, TOOL_NAME_LINE
+from .profiles import LEGACY_INI_MARKERS, OUR_INI_MARKER, TOOL_NAME_LINE
 
 ENGINE = "optiscaler"
 
@@ -502,7 +502,16 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
 
 
 def is_our_ini(text: str) -> bool:
-    return bool(text) and OUR_INI_MARKER in text
+    """是不是本工具生成的 OptiScaler.ini。
+
+    同时认旧版本署名 —— 工具改名前的安装还留在用户机器上，
+    只认新标记的话那些安装会被当成外来文件，卸载时留下残留。
+    """
+    if not text:
+        return False
+    if OUR_INI_MARKER in text or TOOL_NAME_LINE in text:
+        return True
+    return any(m in text for m in LEGACY_INI_MARKERS)
 
 
 def read_multiplier(text: str) -> int:

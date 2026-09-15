@@ -245,6 +245,8 @@ SR_COMPONENTS = ("nvngx_dlss.dll", "sl.dlss.dll", "nvngx_dlssd.dll")
 # 游戏不请求，写多少都没用。
 #
 # 按上游说明：实际生成帧数由游戏请求，并钳到运行库上限。
+# 这段文字不再拼进面向用户的说明里（用户要求只保留操作与后果级别的提示），
+# 保留常量是为了让注释里的这条事实有个落点，也方便以后需要时再取用。
 MULTIPLIER_NOTE = (
     "「最高倍率」是上限，实际生成几帧由游戏请求决定。\n"
     "游戏只有「开/关」时固定按 2X 请求，改上限不改变生成帧数。"
@@ -305,29 +307,22 @@ def predict(
     # 所以措辞要留余地，别让用户以为"文件在就一定能开"。
     if fg:
         p.level = Support.GOOD
-        p.headline = "这个游戏带了帧生成组件"
+        p.headline = "检测到帧生成组件"
         p.reasons.append(f"同目录有 {', '.join(fg)}")
-        # 已知这个游戏不给倍率选择的话，明确点出来，免得用户以为工具没生效
+        # 说明该通道的启用条件，不解释"最高倍率为什么没生效"之类的推测
         no_mult = _known_no_multiplier(exe_name, game_name)
         if no_mult:
-            p.headline = f"{no_mult}带了帧生成组件，但只有「开/关」没有倍率选择"
-            p.reasons.append(f"{no_mult}的帧生成是二选一开关，固定按 2X 请求")
-            p.advice = (
-                "该游戏的帧生成只有开/关，不请求额外倍率。\n"
-                "因此只生成 1 帧（2X），最高倍率写多少都是这个数。"
-            )
-        else:
-            p.advice = (
-                "组件存在只说明游戏包含该通道；通道是否被调用取决于游戏自身的开关。\n"
-                "本工具不修改游戏的画面设置，无法代为打开该开关。\n"
-                + MULTIPLIER_NOTE
-            )
+            p.reasons.append(f"{no_mult}：帧生成为开/关，不请求额外倍率")
+        p.advice = (
+            "组件存在只说明游戏包含该通道；通道是否被调用取决于游戏自身的开关。\n"
+            "本工具不修改游戏的画面设置，无法代为打开该开关。"
+        )
         return p
 
     # ---- 有超分但没帧生成组件 ----
     if sr:
         p.level = Support.UNLIKELY
-        p.headline = "这个游戏有 DLSS 超分，但没看到帧生成组件"
+        p.headline = "检测到 DLSS 超分组件，未检测到帧生成组件"
         p.reasons.append(f"同目录有 {', '.join(sr)}，但没有 {'/'.join(FG_COMPONENTS)}")
         p.advice = (
             "扫描范围是游戏主程序及其插件目录；组件放在其它位置时扫不到。\n"
@@ -337,7 +332,7 @@ def predict(
 
     # ---- 什么都没有 ----
     p.level = Support.MAYBE
-    p.headline = "没在游戏目录里找到 DLSS 相关组件"
+    p.headline = "未在游戏目录检测到 DLSS 相关组件"
     p.reasons.append("同目录既没有 nvngx_dlssg.dll 也没有 nvngx_dlss.dll")
     p.advice = (
         "扫描范围是游戏主程序及其插件目录；组件放在其它位置时扫不到。\n"

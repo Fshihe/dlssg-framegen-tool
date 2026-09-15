@@ -1,4 +1,4 @@
-"""DLSSG 帧生成一键开启工具 —— 核心库（RTX 20 / 30 系列）。
+"""帧生成解锁工具 —— 核心库。
 
 本工具带**两个互斥的引擎**，同一个游戏目录只能装一个：
 
@@ -32,9 +32,11 @@
 
 from __future__ import annotations
 
-APP_NAME = "DLSSG 帧生成一键开启工具"
+APP_NAME = "帧生成解锁工具"
+# 数据目录标识保持不变：改了会让用户机器上现有的安装记录、备份、日志全部失联
+# （游戏目录里的文件还在，但工具认不出来，卸载会留下残留）。
 APP_ID = "dlssg-sm86-tool"
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 
 # 上游 Mod 版本（payload 来源）
 UPSTREAM_NAME = "DLSSG Native"

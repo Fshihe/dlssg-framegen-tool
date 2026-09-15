@@ -580,7 +580,7 @@ def cmd_hags(args) -> int:
         out(f"开启方法（任选其一）：")
         out(f"  1. {winenv.HAGS_GUI_PATH}")
         out(f"  2. 本工具图形界面里的「开启硬件加速 GPU 计划」按钮")
-        out(f"  3. 命令行：dlssg-tool hags --enable -y")
+        out(f"  3. 命令行：framegen-unlock hags --enable -y")
         out("")
         out("改完必须重启电脑才会生效。")
         return 2
@@ -703,8 +703,8 @@ def cmd_paths(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="dlssg-tool",
-        description=f"{APP_NAME} v{VERSION} —— 为 RTX 20/30 系显卡一键开启 DLSS 帧生成",
+        prog="framegen-unlock",
+        description=f"{APP_NAME} v{VERSION} —— 为显卡开启帧生成（DLSSG / XeSS 两个引擎）",
         epilog=f"上游 Mod：{UPSTREAM_REPO}  ({UPSTREAM_VERSION})",
     )
     p.add_argument("--version", action="version", version=f"{APP_NAME} {VERSION}")
