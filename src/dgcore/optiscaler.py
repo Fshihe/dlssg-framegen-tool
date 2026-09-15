@@ -1284,10 +1284,16 @@ def preflight(
     running_names: list[str] | None = None,
     anticheat=None,
     fg_input: str = "upscaler",
+    coexist: bool = False,
 ) -> list[Check]:
-    """OptiScaler 引擎的安装前预检。有任何 error 就不该继续。"""
+    """OptiScaler 引擎的安装前预检。有任何 error 就不该继续。
+
+    coexist:
+        True 表示允许"DLSSG 引擎 + OptiScaler"共存（详见下面第 1 条）。
+    """
     from . import ueconfig
-    from .state import ENGINE_OPTISCALER, conflict_message, other_engine_install
+    from .state import (ENGINE_DLSSG, ENGINE_OPTISCALER, conflict_message,
+                        engine_of, other_engine_install)
 
     target_dir = Path(target_dir)
     out: list[Check] = []
@@ -1307,9 +1313,28 @@ def preflight(
         "出问题直接卸载即可还原，游戏文件本身不会被改动。",
     ))
 
-    # 1) 引擎互斥 —— 这条最要紧
+    # 1) 引擎互斥 —— 这条最要紧。
+    #    但"DLSSG 引擎 + OptiScaler"这一对是例外：用户显式开了共存模式就放行。
+    #
+    #    为什么这一对可以共存：两者各用各的代理入口（DLSSG 用 version.dll、
+    #    OptiScaler 用 dxgi.dll），实测在同一个进程里同时工作正常 ——
+    #    帕鲁上跑了 2 分半、黑神话上 3 分钟，都没有互相打架。
+    #
+    #    而且它解决了一个真问题：UE 游戏里 FGInput=upscaler 会撞上
+    #    「运动矢量与深度分辨率不一致」（帕鲁实测 5572 次报错），而 DLSSG 引擎
+    #    把游戏自身的 DLSS 帧生成通道变成真的之后，OptiScaler 就能改用
+    #    FGInput=dlssg —— 那条路对这个坑免疫（同机同配置实测 0 报错）。
     other = other_engine_install(target_dir, ENGINE_OPTISCALER)
-    if other:
+    if other and coexist and engine_of(other) == ENGINE_DLSSG:
+        out.append(Check(
+            "warn", "共存模式：本目录同时装了 DLSSG 引擎",
+            "这是有意为之的组合。DLSSG 引擎负责把游戏自身的 DLSS 帧生成通道变成"
+            "真的，OptiScaler 再拿它当输入源，倍率由 OptiScaler 决定。\n\n"
+            "配套要求：**帧生成输入源必须是 dlssg**。用 upscaler 的话，UE 游戏会撞上"
+            "「运动矢量与深度分辨率不一致」，XeFG 每帧失败、倍率不起作用。\n\n"
+            "两者各自独立：卸载任意一个都不会动另一个的文件。",
+        ))
+    elif other:
         out.append(Check("error", "该目录已安装另一个引擎",
                          conflict_message(other, ENGINE_OPTISCALER)))
     else:
@@ -1322,8 +1347,23 @@ def preflight(
     #      OptiScaler 就处在一个"配置要求了但输入不存在"的状态。
     #      黑神话上这么装之后，游戏直接闪退。
     if (fg_input or "").lower() == "dlssg":
+        # 提供方有两种可能：① 本目录装了 DLSSG 引擎（共存模式，最可靠）；
+        # ② 游戏自己在主程序附近就带 DLSSG 组件。
+        # 少了 ① 这条判断，共存模式会被这里直接拦死 —— 而它恰恰是最该放行的
+        # 那种情况（帕鲁的 DLSSG 组件在 Plugins\StreamlineCore 下，主程序附近
+        # 扫不到，于是被误判成"没有提供方"）。
+        dlssg_engine_here = bool(other and engine_of(other) == ENGINE_DLSSG)
         has_fg, why = _game_has_framegen(target_dir)
-        if has_fg:
+
+        if dlssg_engine_here:
+            out.append(Check(
+                "warn", "FGInput=dlssg：提供方在位，但要在游戏里打开帧生成",
+                "本目录装了 DLSSG 引擎 —— 它会把游戏自身的 DLSS 帧生成通道换成真的"
+                "（替换 nvngx_dlssg.dll），所以 dlssg 输入有数据可取。\n\n"
+                "但那条通道只在游戏里开启「帧生成」之后才会被调用。"
+                "请进画面设置确认帧生成是开着的 —— DLSSG 引擎会让这个开关变得可用。",
+            ))
+        elif has_fg:
             out.append(Check(
                 "warn", "FGInput=dlssg：必须先在游戏里打开「帧生成」",
                 "这个输入源取的是游戏自身 DLSSG（Streamline）通道的数据。\n"
@@ -1333,14 +1373,35 @@ def preflight(
             ))
         else:
             out.append(Check(
-                "error", "FGInput=dlssg 风险过高：附近没找到 DLSSG 组件",
-                "在游戏主程序附近没找到 nvngx_dlssg.dll / sl.dlss_g.dll。\n"
-                "组件也可能装在别的子目录（比如 UE 的 Engine\\Plugins），\n"
-                "本工具只扫了主程序附近，所以这不等于游戏一定没有。\n\n"
-                "但把输入源指向一个可能不存在、且需要游戏内开关才会激活的通道，\n"
-                "实测会让游戏直接闪退。**请改用 FGInput=upscaler。**\n"
-                "确实要用 dlssg 的话，请先确认游戏里已开启帧生成。",
+                "error", "FGInput=dlssg 风险过高：没有找到提供方",
+                "既没有在本目录装 DLSSG 引擎，也没在游戏主程序附近找到 "
+                "nvngx_dlssg.dll / sl.dlss_g.dll。\n"
+                "组件也可能装在别的子目录（比如 UE 的 Plugins），本工具只扫了"
+                "主程序附近，所以这不等于游戏一定没有。\n\n"
+                "把输入源指向一个可能不存在的通道，实测会让游戏直接闪退。\n"
+                "两种情况二选一：**改用 FGInput=upscaler**，"
+                "或者先装 DLSSG 引擎并勾上「共存模式」。",
             ))
+
+    # 1.6) 输入源与共存模式的搭配建议。
+    #      这两条都是"选错了不报错、只是不生效"的坑，必须在装之前说清。
+    if coexist and (fg_input or "").lower() != "dlssg":
+        out.append(Check(
+            "warn", "共存模式下建议把输入源改成 dlssg",
+            "既然本目录已经装了 DLSSG 引擎，游戏自身的 DLSS 帧生成通道就是可用的 ——\n"
+            "用 dlssg 当输入源能绕开「运动矢量与深度分辨率不一致」那个坑。\n\n"
+            "upscaler 输入只适合「游戏没有帧生成、只有超分」的场合。",
+        ))
+    if (fg_input or "").lower() == "dlssg" and not (other and engine_of(other) == ENGINE_DLSSG):
+        out.append(Check(
+            "warn", "dlssg 输入源可能没有提供方",
+            "dlssg 输入取的是游戏自身 DLSSG（Streamline）通道的数据。\n"
+            "RTX 20/30 上那条通道默认是被拒的（Streamline 会说 "
+            "not supported on current hardware），需要先装**本工具的 DLSSG 引擎**"
+            "把它换掉；或者游戏本身在你这张卡上就支持 DLSS 帧生成。\n\n"
+            "提供方不存在时，OptiScaler 会停在无效状态（实测会让游戏闪退）。\n"
+            "想省事就同时勾上「共存模式」，并先装一次 DLSSG 引擎。",
+        ))
 
     # 2) 外来 Mod
     from .installer import foreign_mods
@@ -1630,7 +1691,7 @@ def uninstall_installed(target_dir: str | Path, force: bool = False) -> OptiResu
         gone = clean_runtime_leftovers(target_dir)
         if gone:
             res.message += f"，并清理运行产物 {len(gone)} 项"
-        forget_install(target_dir)
+        forget_install(target_dir, ENGINE_OPTISCALER)
     return res
 
 

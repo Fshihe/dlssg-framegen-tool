@@ -1265,6 +1265,48 @@ def run(verbose: bool = True) -> Runner:
         # 清理这条记录，别影响后面的用例
         st.forget_install(gMx)
 
+        # 19e-1. 共存模式：同一个目录允许 DLSSG 引擎 + OptiScaler 引擎。
+        #        这一对实测能同进程共存（各用各的代理入口：version.dll / dxgi.dll），
+        #        而且它解决的正是"UE 游戏里 upscaler 输入撞 MV 分辨率"那个坑：
+        #        DLSSG 引擎把游戏自身的 DLSS 帧生成通道变成真的之后，
+        #        OptiScaler 改用 dlssg 输入就绕开了那个问题。
+        gCo = tmp / "CoexistGame"
+        _make_fake_game(gCo, foreign=False)
+        st.record_install({
+            "engine": st.ENGINE_DLSSG, "target_dir": str(gCo.resolve()),
+            "proxy": "version.dll", "files": [], "originals": {},
+        })
+        co_checks = oi.preflight(gCo, "optiscaler-xess", 4, running_names=[],
+                                 fg_input="dlssg", coexist=True)
+        r.check("共存：打开后 OptiScaler 不再被互斥拦住",
+                not any(c.level == "error" and "另一个引擎" in c.title for c in co_checks),
+                str([c.title for c in co_checks if c.level == "error"]))
+        r.check("共存：会明说这是共存模式",
+                any("共存模式" in c.title for c in co_checks),
+                str([c.title for c in co_checks]))
+        pf_co = installer.preflight(gCo, None, "version.dll", "SM86", coexist=True)
+        r.check("共存：DLSSG 侧预检也放行",
+                not any("另一个引擎" in c.title for c in pf_co.errors),
+                str([c.title for c in pf_co.errors]))
+        co_up = oi.preflight(gCo, "optiscaler-xess", 4, running_names=[],
+                             fg_input="upscaler", coexist=True)
+        r.check("共存：输入源仍是 upscaler 时给出提醒",
+                any("建议把输入源改成 dlssg" in c.title for c in co_up),
+                str([c.title for c in co_up if c.level == "warn"]))
+        # 两条记录必须同时留着 —— 否则第二个引擎装完，第一个就再也卸载不掉了
+        st.record_install({
+            "engine": st.ENGINE_OPTISCALER, "target_dir": str(gCo.resolve()),
+            "proxy": "dxgi.dll", "files": [], "originals": {},
+        })
+        r.check("共存：两个引擎的记录同时存在",
+                installer.engines_present(gCo) == [st.ENGINE_DLSSG, st.ENGINE_OPTISCALER],
+                str(installer.engines_present(gCo)))
+        st.forget_install(gCo, st.ENGINE_OPTISCALER)
+        r.check("共存：按引擎丢记录时不动另一个",
+                installer.engines_present(gCo) == [st.ENGINE_DLSSG],
+                str(installer.engines_present(gCo)))
+        st.forget_install(gCo)
+
         # 19e-2. 记录丢了、文件还在时，互斥保护不能失效
         #        （状态文件被清理是真实会发生的；此时若只查记录就会静默放行）
         gOrphan = tmp / "OrphanGame"

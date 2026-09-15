@@ -302,6 +302,20 @@ class App(tk.Tk):
         self.frames_hint = ttk.Label(opt, text="", font=FONT, foreground=C_DIM)
         self.frames_hint.grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
+        # 共存模式：允许 DLSSG 引擎与 OptiScaler 引擎装在同一个目录。
+        # 两者各用各的代理入口（DLSSG 用 version.dll、OptiScaler 用 dxgi.dll），
+        # 实测能同进程共存（帕鲁 2 分半、黑神话 3 分钟）。
+        # 这个组合解决的是一个真问题：UE 游戏里 FGInput=upscaler 会撞上
+        # 「运动矢量与深度分辨率不一致」（帕鲁 5572 次报错、倍率不起作用）；
+        # DLSSG 引擎把游戏自身的 DLSS 帧生成通道变成真的之后，OptiScaler 改用
+        # dlssg 输入就没这个问题（同机同配置 0 报错）。倍率仍由本引擎决定。
+        self.coexist_var = tk.BooleanVar(value=False)
+        self.coexist_check = ttk.Checkbutton(
+            opt, text="与 DLSSG 引擎共存（帧生成改走 DLSS 流输入，倍率仍由本引擎决定）",
+            variable=self.coexist_var,
+        )
+        self.coexist_check.grid(row=7, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
         # ---------------- 操作按钮 ----------------
         act = ttk.Frame(root)
         act.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -579,6 +593,11 @@ class App(tk.Tk):
         # HighResMV 是 OptiScaler 专有开关，DLSSG 引擎下无意义
         try:
             self.hiresmv_check.configure(state="normal" if is_opti else "disabled")
+        except tk.TclError:
+            pass
+        # 共存模式同理：它描述的是 OptiScaler 引擎怎么和 DLSSG 引擎搭配
+        try:
+            self.coexist_check.configure(state="normal" if is_opti else "disabled")
         except tk.TclError:
             pass
 
@@ -997,13 +1016,30 @@ class App(tk.Tk):
             return None
         return Path(self.chosen_exe).parent
 
+    def _opti_coexist(self) -> bool:
+        """是否勾了「与 DLSSG 引擎共存」。"""
+        try:
+            return bool(self.coexist_var.get())
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _opti_fg_input(self) -> str:
+        """帧生成输入源。
+
+        共存模式下自动用 dlssg —— 那时 DLSSG 引擎在位，游戏自身的 DLSS 帧生成
+        通道是真的，用 dlssg 输入能绕开「运动矢量与深度分辨率不一致」。
+        其余场合用 upscaler（游戏只有超分的场景）。
+        """
+        return "dlssg" if self._opti_coexist() else "upscaler"
+
     def _opti_preflight(self, target_dir: Path, bundle: str, quiet: bool = False):
         acr = ac.scan(self.selected.root)
         checks = optiscaler.preflight(
             target_dir, bundle, self._current_multiplier(),
             running_names=[self.chosen_exe.name] if self.chosen_exe else [],
             anticheat=acr,
-            fg_input="upscaler",
+            fg_input=self._opti_fg_input(),
+            coexist=self._opti_coexist(),
         )
         if not quiet:
             self._log("—" * 30)
@@ -1021,12 +1057,15 @@ class App(tk.Tk):
         plan = optiscaler.make_plan(target_dir, self.chosen_exe, bundle,
                                     self._current_multiplier(),
                                     game_name=self.selected.name,
-                                    high_res_mv=bool(self.hiresmv_var.get()))
+                                    high_res_mv=bool(self.hiresmv_var.get()),
+                                    fg_input=self._opti_fg_input())
         spec = optiscaler.get_bundle(bundle)
         lines = [
             f"安装目录：{target_dir}",
             f"引擎包：{spec.display_name}",
             f"倍率：{self._current_multiplier()}X",
+            f"帧生成输入源：{self._opti_fg_input()}"
+            + ("（共存模式）" if self._opti_coexist() else ""),
             f"代理入口：{plan.proxy}",
             "",
         ]
@@ -1099,7 +1138,8 @@ class App(tk.Tk):
 
         def work():
             return optiscaler.install(target_dir, self.chosen_exe, bundle, mult,
-                                      game_name=game, high_res_mv=hires)
+                                      game_name=game, high_res_mv=hires,
+                                      fg_input=self._opti_fg_input())
 
         def done(res):
             if not res.success:

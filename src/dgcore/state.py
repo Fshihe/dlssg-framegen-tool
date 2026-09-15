@@ -83,27 +83,45 @@ def save_state(state: dict) -> None:
 
 
 def record_install(rec: dict) -> None:
-    """记一条安装。同一个游戏目录只保留最新一条 —— 因为互斥，同时只可能有一个引擎。"""
+    """记一条安装。按 (游戏目录, 引擎) 唯一。
+
+    共存模式下同一个目录会同时存在 DLSSG 引擎与 OptiScaler 引擎两条记录，
+    各自独立卸载。早期版本按目录唯一 —— 理由是"互斥，同时只可能有一个引擎"。
+    共存打破了这个前提：按目录去重会把另一个引擎的记录冲掉，于是它再也
+    卸载不掉、变成残留。
+    """
     rec = dict(rec)
     rec["target_dir_key"] = path_key(rec["target_dir"])
+    eng = engine_of(rec)
     st = load_state()
     st.setdefault("installs", [])
     key = rec["target_dir_key"]
     st["installs"] = [
         i for i in st["installs"]
-        if (i.get("target_dir_key") or path_key(i.get("target_dir", ""))) != key
+        if not (
+            (i.get("target_dir_key") or path_key(i.get("target_dir", ""))) == key
+            and engine_of(i) == eng
+        )
     ]
     st["installs"].append(rec)
     save_state(st)
 
 
-def forget_install(target_dir: str | Path) -> None:
+def forget_install(target_dir: str | Path, engine: str | None = None) -> None:
+    """丢掉安装记录。
+
+    engine=None  → 丢掉该目录的**全部**记录（清场用，旧行为）；
+    engine=指定  → 只丢该引擎那条 —— 共存模式下卸载一个绝不动另一个。
+    """
     st = load_state()
     key = path_key(target_dir)
-    st["installs"] = [
-        i for i in st.get("installs", [])
-        if (i.get("target_dir_key") or path_key(i.get("target_dir", ""))) != key
-    ]
+
+    def keep(i: dict) -> bool:
+        if (i.get("target_dir_key") or path_key(i.get("target_dir", ""))) != key:
+            return True
+        return engine is not None and engine_of(i) != engine
+
+    st["installs"] = [i for i in st.get("installs", []) if keep(i)]
     save_state(st)
 
 

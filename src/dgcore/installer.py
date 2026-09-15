@@ -445,8 +445,13 @@ def preflight(
     running_names: list[str] | None = None,
     anticheat=None,
     version: str | None = None,
+    coexist: bool = False,
 ) -> Preflight:
-    """安装前把所有风险点查一遍，一条都不让过。"""
+    """安装前把所有风险点查一遍，一条都不让过。
+
+    coexist:
+        True 表示允许与 OptiScaler 引擎共存（详见下面第 8.5 条）。
+    """
     pf = Preflight()
     target_dir = Path(target_dir)
     prof = profiles.for_router(router, prefer=version)
@@ -593,8 +598,21 @@ def preflight(
         pf.add("warn", "已存在 dlssg_sm86.ini", "会先备份再覆盖（可能是你手改过的配置）")
 
     # 8.5 引擎互斥：这个目录是不是已经装了 OptiScaler 引擎
+    #      共存模式（coexist）下放行这一对：两者各用各的代理入口
+    #      （DLSSG 用 version.dll、OptiScaler 用 dxgi.dll），实测能在同一个进程里
+    #      同时工作 —— 帕鲁上跑了 2 分半、黑神话上 3 分钟，都没互相打架。
     _other = other_engine_install(target_dir, ENGINE_DLSSG)
-    if _other:
+    if _other and coexist and engine_of(_other) == ENGINE_OPTISCALER:
+        pf.add(
+            "warn",
+            "共存模式：本目录同时装有 OptiScaler 引擎",
+            "这是有意为之的组合：DLSSG 引擎负责把游戏自身的 DLSS 帧生成通道变成真的，"
+            "OptiScaler 再拿它当输入源，倍率由 OptiScaler 决定。\n\n"
+            "OptiScaler 那一侧的帧生成输入源必须是 dlssg —— 用 upscaler 的话，"
+            "UE 游戏会撞上「运动矢量与深度分辨率不一致」，倍率不起作用。\n\n"
+            "两者各自独立：卸载任意一个都不会动另一个的文件。",
+        )
+    elif _other:
         pf.add("error", "该目录已安装另一个引擎", state.conflict_message(_other, ENGINE_DLSSG))
     else:
         # 记录可能被清理过，但文件还在 —— 按内容再认一遍。
@@ -1223,7 +1241,7 @@ def uninstall(target_dir: str | Path, force: bool = False) -> UninstallResult:
         except Exception as exc:
             res.message += f"还原 {name} 失败：{exc}；"
 
-    forget_install(target_dir)
+    forget_install(target_dir, ENGINE_DLSSG)
     res.success = True
     res.message = (res.message or "卸载完成") + (
         f" 删除 {len(res.removed)} 个文件"
@@ -1279,61 +1297,112 @@ def restore_backup(backup_dir: str | Path, target_dir: str | Path) -> UninstallR
 #
 # 顺序：先看安装记录；记录丢了就按内容认（两个引擎都支持按哈希识别）。
 
-def engine_present(target_dir: str | Path) -> str:
-    """这个目录当前装的是哪个引擎。没装就返回空串。"""
-    rec = find_install(target_dir)
-    if rec:
-        return engine_of(rec)
+def engines_present(target_dir: str | Path) -> list[str]:
+    """这个目录当前装了哪些引擎 —— 共存模式下可能两个都有。
+
+    先看安装记录，再看文件内容：记录被清理过时，靠内容也能认出来。
+    """
+    key = state.path_key(target_dir)
+    found: set[str] = set()
+    for rec in all_installs():
+        if (rec.get("target_dir_key") or state.path_key(rec.get("target_dir", ""))) == key:
+            found.add(engine_of(rec))
 
     from . import optiscaler
 
     if optiscaler.detect_ours(target_dir):
-        return ENGINE_OPTISCALER
+        found.add(ENGINE_OPTISCALER)
     if detect_ours(target_dir):
-        return ENGINE_DLSSG
-    return ""
+        found.add(ENGINE_DLSSG)
+    return sorted(found)
+
+
+def engine_present(target_dir: str | Path) -> str:
+    """这个目录当前装的是哪个引擎。没装就返回空串。
+
+    共存模式下可能两个都在 —— 这里只返回第一个，要完整清单用 engines_present()。
+    """
+    found = engines_present(target_dir)
+    return found[0] if found else ""
 
 
 def uninstall_any(target_dir: str | Path, force: bool = False):
-    """按引擎路由卸载。返回对象都带 success / message / removed / restored。"""
-    which = engine_present(target_dir)
-    if which == ENGINE_OPTISCALER:
-        from . import optiscaler
+    """按引擎路由卸载。
 
-        return optiscaler.uninstall_installed(target_dir, force=force)
+    共存模式下两个引擎可能同时装在同一个目录里，所以这里**两个都卸** ——
+    「卸载并还原」的语义就是把这个目录恢复成安装前的样子。
+    """
+    from . import optiscaler
 
-    res = uninstall(target_dir, force=force)
+    which = engines_present(target_dir)
+    if not which:
+        which = [ENGINE_DLSSG]          # 没有任何记录与痕迹：仍走一次兜底路径
 
-    # 补一刀：OptiScaler 引擎会往游戏 Engine.ini 写一行配置。如果记录丢了、
-    # 或者用户是从 DLSSG 引擎那边点的卸载，那一行没人负责清理，
-    # 就会永远留在用户的游戏配置里。这里按标记行兜底清掉。
-    try:
-        from . import optiscaler, ueconfig
+    results = []
+    if ENGINE_DLSSG in which:
+        res = uninstall(target_dir, force=force)
 
-        if not optiscaler.detect_ours(target_dir):
-            r = ueconfig.strip_orphan(target_dir)
-            if r.changed:
-                res.message += f"；{r.detail}"
-    except Exception:
-        pass
+        # 补一刀：OptiScaler 引擎会往游戏 Engine.ini 写一行配置。如果记录丢了、
+        # 或者用户是从 DLSSG 引擎那边点的卸载，那一行没人负责清理，
+        # 就会永远留在用户的游戏配置里。这里按标记行兜底清掉。
+        if ENGINE_OPTISCALER not in which:
+            try:
+                from . import ueconfig
 
-    return res
+                r = ueconfig.strip_orphan(target_dir)
+                if r.changed:
+                    res.message += f"；{r.detail}"
+            except Exception:
+                pass
+        results.append(res)
+
+    if ENGINE_OPTISCALER in which:
+        results.append(optiscaler.uninstall_installed(target_dir, force=force))
+
+    if len(results) == 1:
+        return results[0]
+
+    first = results[0]
+    first.success = all(r.success for r in results)
+    first.message = "；".join(r.message for r in results if r.message)
+    for r in results[1:]:
+        first.removed.extend(r.removed)
+        first.restored.extend(r.restored)
+    return first
 
 
 def verify_any(target_dir: str | Path) -> VerifyResult:
-    """按引擎路由体检，统一成 VerifyResult。"""
-    which = engine_present(target_dir)
-    if which == ENGINE_OPTISCALER:
-        from . import optiscaler
+    """按引擎路由体检，统一成 VerifyResult。共存模式下两个引擎都检。"""
+    from . import optiscaler
 
+    which = engines_present(target_dir)
+    if not which:
+        return verify(target_dir)
+
+    parts: list[VerifyResult] = []
+    if ENGINE_DLSSG in which:
+        parts.append(verify(target_dir))
+    if ENGINE_OPTISCALER in which:
         vr = optiscaler.verify_installed(target_dir)
-        return VerifyResult(
+        parts.append(VerifyResult(
             installed=vr.installed,
             healthy=vr.healthy,
             details=[Check(lv, t, d) for lv, t, d in vr.details],
-            record=find_install(target_dir),
-        )
-    return verify(target_dir)
+            record=find_install(target_dir, ENGINE_OPTISCALER),
+        ))
+
+    if len(parts) == 1:
+        return parts[0]
+
+    # 两个都在：合并成一条结果。healthy 只统计真正装了的那部分，
+    # 免得"一个装了且健康、另一个没记录"被算成不健康。
+    installed_parts = [p for p in parts if p.installed]
+    return VerifyResult(
+        installed=bool(installed_parts),
+        healthy=all(p.healthy for p in installed_parts) if installed_parts else False,
+        details=[d for p in parts for d in p.details],
+        record=find_install(target_dir),
+    )
 
 
 __all__ = [
@@ -1352,6 +1421,7 @@ __all__ = [
     "restore_backup",
     "foreign_mods",
     "engine_present",
+    "engines_present",
     "uninstall_any",
     "verify_any",
     "find_install",

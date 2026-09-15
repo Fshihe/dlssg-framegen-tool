@@ -205,7 +205,8 @@ def cmd_check(args) -> int:
     out(f"计算路由  : {router}")
     out("")
     acr = ac.scan(root)
-    pf = installer.preflight(Path(target), exe, proxy, router, env=env, anticheat=acr)
+    pf = installer.preflight(Path(target), exe, proxy, router, env=env, anticheat=acr,
+                             coexist=_coexist(args))
     _print_checks(pf.checks)
     out("")
     out(f"结论：{'可以安装' if pf.ok else '存在阻断问题，不能安装'}")
@@ -239,6 +240,26 @@ def _oi_hires_mv(args):
     return v != "off"
 
 
+def _coexist(args) -> bool:
+    """是否允许"DLSSG 引擎 + OptiScaler 引擎"共存。"""
+    return bool(getattr(args, "coexist", False))
+
+
+def _oi_fg_input(args) -> str:
+    """帧生成输入源。
+
+    auto（默认）→ 共存模式下用 dlssg，否则 upscaler。
+
+    为什么这么定：共存意味着 DLSSG 引擎在位，游戏自身的 DLSS 帧生成通道是真的，
+    用 dlssg 当输入能绕开「运动矢量与深度分辨率不一致」那个坑
+    （同机同配置实测：upscaler 6441 次报错、dlssg 0 次）。
+    """
+    v = (getattr(args, "fg_input", "auto") or "auto").lower()
+    if v == "auto":
+        return "dlssg" if _coexist(args) else "upscaler"
+    return v
+
+
 def _print_oi_checks(checks) -> None:
     marks = {"ok": "[ OK ]", "warn": "[WARN]", "error": "[FAIL]"}
     for c in checks:
@@ -261,7 +282,8 @@ def _oi_check(args, root, exe, tdir: Path) -> int:
     checks = optiscaler.preflight(tdir, bundle, _oi_mult(args),
                                   running_names=[Path(exe).name] if exe else [],
                                   anticheat=acr,
-                                  fg_input=getattr(args, "fg_input", "upscaler"))
+                                  fg_input=_oi_fg_input(args),
+                                  coexist=_coexist(args))
     _print_oi_checks(checks)
     ok = not any(c.level == "error" for c in checks)
     out("")
@@ -274,7 +296,7 @@ def _oi_plan(args, root, exe, tdir: Path) -> int:
     mult = _oi_mult(args)
     plan = optiscaler.make_plan(tdir, exe, bundle, mult, game_name=root.name,
                                 high_res_mv=_oi_hires_mv(args),
-                                fg_input=getattr(args, "fg_input", "upscaler"))
+                                fg_input=_oi_fg_input(args))
     _hdr("将要执行的改动（预演，不会真的写入）")
     out(f"引擎包：{optiscaler.get_bundle(bundle).display_name}")
     out(f"倍率  ：{mult}X（{optiscaler.multiplier_label(mult)}）")
@@ -309,12 +331,15 @@ def _oi_install(args, root, exe, tdir: Path) -> int:
     out(f"主程序  : {exe or '(未找到)'}")
     out(f"引擎包  : {spec.display_name}")
     out(f"倍率    : {mult}X（{optiscaler.multiplier_label(mult)}）")
+    out(f"输入源  : {_oi_fg_input(args)}"
+        + ("（共存模式：不清理 DLSSG 引擎）" if _coexist(args) else ""))
 
     acr = ac.scan(root)
     checks = optiscaler.preflight(tdir, bundle, mult,
                                   running_names=[Path(exe).name] if exe else [],
                                   anticheat=acr,
-                                  fg_input=getattr(args, "fg_input", "upscaler"))
+                                  fg_input=_oi_fg_input(args),
+                                  coexist=_coexist(args))
     out("")
     _print_oi_checks(checks)
     errors = [c for c in checks if c.level == "error"]
@@ -340,7 +365,7 @@ def _oi_install(args, root, exe, tdir: Path) -> int:
 
     res = optiscaler.install(tdir, exe, bundle, mult, game_name=root.name,
                              high_res_mv=_oi_hires_mv(args),
-                             fg_input=getattr(args, "fg_input", "upscaler"))
+                             fg_input=_oi_fg_input(args))
     out("")
     if not res.success:
         out(res.message)
@@ -417,7 +442,7 @@ def cmd_install(args) -> int:
 
     acr = ac.scan(root)
     pf = installer.preflight(tdir, exe, proxy, router, env=env, anticheat=acr,
-                             version=prof.version)
+                             version=prof.version, coexist=_coexist(args))
     out("")
     _print_checks(pf.checks)
 
@@ -479,11 +504,12 @@ def cmd_install(args) -> int:
 def cmd_uninstall(args) -> int:
     root, exe, target = resolve_target(args.path)
     tdir = Path(target)
-    which = installer.engine_present(tdir)
+    which = installer.engines_present(tdir)
     _hdr("卸载并还原")
     out(f"游戏目录：{tdir}")
     if which:
-        out(f"安装的引擎：{installer.engine_label(which)}")
+        # 共存模式下可能两个引擎都在 —— 都会卸掉
+        out("安装的引擎：" + "、".join(installer.engine_label(w) for w in which))
     res = installer.uninstall_any(tdir, force=args.force)
     out("")
     out(res.message)
@@ -677,17 +703,24 @@ def build_parser() -> argparse.ArgumentParser:
                         help="强制指定上游版本（默认按路由自动选：SM86→0.3.0，SM75→0.2.4）")
         sp.add_argument("--engine", default="dlssg", choices=["dlssg", "optiscaler"],
                         help="用哪个引擎：dlssg（NVIDIA DLSS 帧生成）或 "
-                             "optiscaler（XeSS 帧生成 / DLSS 5）。两者互斥。")
+                             "optiscaler（XeSS 帧生成 / DLSS 5）。默认互斥，"
+                             "加 --coexist 可让两者共存。")
+        sp.add_argument("--coexist", action="store_true",
+                        help="允许 dlssg 引擎与 optiscaler 引擎装在同一目录（进阶）。"
+                             "两者各用各的代理入口，实测能同进程共存；配 "
+                             "--fg-input dlssg 使用，倍率由 optiscaler 决定。")
         sp.add_argument("--bundle", choices=optiscaler.bundle_keys(),
                         help="optiscaler 引擎的引擎包（默认 xess）")
         sp.add_argument("--multiplier", type=int, default=4,
                         help="optiscaler 引擎的帧生成倍率 2/3/4/5/6（默认 4）")
         sp.add_argument("--high-res-mv", default="auto", choices=["on", "off", "auto"],
                         help="XeFG 运动矢量按高分辨率处理（默认 auto = 不改上游值）")
-        sp.add_argument("--fg-input", default="upscaler",
-                        choices=["upscaler", "dlssg", "fsrfg"],
-                        help="帧生成输入源：upscaler（游戏超分，默认）"
-                             "或 dlssg（游戏自带 DLSSG/Streamline）")
+        sp.add_argument("--fg-input", default="auto",
+                        choices=["auto", "upscaler", "dlssg", "fsrfg"],
+                        help="帧生成输入源。auto（默认）= 共存时用 dlssg、否则用 "
+                             "upscaler；upscaler 适合只有超分没有帧生成的那些游戏；"
+                             "dlssg 取游戏自身 DLSSG/Streamline 通道，能绕开 UE 的"
+                             "运动矢量分辨率问题（需要先有 DLSSG 引擎或游戏原生支持）")
 
     sp = sub.add_parser("detect", help="检测显卡与系统环境")
     sp.add_argument("--json", action="store_true")
