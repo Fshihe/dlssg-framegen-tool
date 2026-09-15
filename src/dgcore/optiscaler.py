@@ -346,7 +346,8 @@ def normalize_multiplier(mult: int) -> int:
 
 def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
               log_level: int | None = 2, high_res_mv: bool | None = None,
-              fg_input: str = "upscaler", force_borderless: bool = True) -> str:
+              fg_input: str = "upscaler", force_borderless: bool = True,
+              fg_enabled: bool = True) -> str:
     """生成 OptiScaler.ini：模板 + 定点修改 + 我们自己的署名头。
 
     log_level:
@@ -362,9 +363,20 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
         "dlssg"    → 用游戏自身 DLSSG（Streamline）的输入。
                       **需要先在游戏里打开帧生成**，否则会处于无效状态、可能导致闪退。
 
+    fg_enabled:
+        False → 关掉本引擎自己的帧生成（[FrameGen] Enabled=false），
+                只留神经网络渲染（DLSS 5 NR）等其它通道。
+
+        为什么需要这个：帧生成由谁负责，只能有一个。引擎一（DLSSG）是帕鲁上
+        唯一被验证"生成的帧真的进了画面"的帧生成器；OptiScaler 的 XeFG 在同一
+        个游戏里跟它抢呈现，结果是计数器在涨、画面纹丝不动。
+        所以"引擎一负责帧生成 + OptiScaler 只做 NR"这个组合必须能把
+        OptiScaler 的帧生成关掉 —— 这就是这个参数存在的理由。
+
     force_borderless:
         XeFG 在**独占全屏下根本不工作**（OptiScaler 官方说明），所以默认强制
         无边框窗口。这是"菜单里显示 4X 但帧数没变"的常见原因之一。
+        fg_enabled=False 时它没有意义，会显式写成 false 不去干扰游戏自身的呈现。
     """
     spec = get_bundle(key)
     if spec is None:
@@ -380,11 +392,14 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
     interp = mult - 1                     # 插值帧数 = 倍率 - 1
     unlock = mult > UNLOCK_ABOVE
 
-    # 帧生成：输入按参数选，输出固定用 XeSS 帧生成
+    # 帧生成：输入按参数选，输出固定用 XeSS 帧生成。
+    # fg_enabled=False 时整个通道关掉，倍率/无边框那些键也一并回到不干扰的状态
+    # —— 帧生成交给引擎一，本引擎只做 NR。
     fg_in = (fg_input or "upscaler").strip()
     if fg_in.lower() not in ("upscaler", "dlssg", "fsrfg", "nukems", "fsrfg30"):
         fg_in = "upscaler"
-    text = _set_in_section(text, "FrameGen", "Enabled", "true")
+    text = _set_in_section(text, "FrameGen", "Enabled",
+                           "true" if fg_enabled else "false")
     text = _set_in_section(text, "FrameGen", "FGInput", fg_in)
     text = _set_in_section(text, "FrameGen", "FGOutput", FG_OUTPUT)
     text = _set_in_section(text, "FrameGen", "FGNvngxReplacement", "None")
@@ -394,9 +409,10 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
     text = _set_in_section(text, "XeFG", "UnlockMFG", "true" if unlock else "false")
     text = _set_in_section(text, "XeFG", "MaxInterpolatedFrames", str(interp))
 
-    # 独占全屏下 XeFG 不工作 —— 强制无边框
+    # 独占全屏下 XeFG 不工作 —— 强制无边框。
+    # 但帧生成关掉时不能强改窗口模式：那会影响游戏自身的呈现方式。
     text = _set_in_section(text, "XeFG", "ForceBorderless",
-                           "true" if force_borderless else "false")
+                           "true" if (force_borderless and fg_enabled) else "false")
 
     # 运动矢量分辨率：默认不动（见 docstring）
     if high_res_mv is not None:
@@ -457,9 +473,14 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
         header.append("; 异常、也可能崩溃。出问题就退回 2X/3X/4X。")
     if key == "optiscaler-dlss5":
         header.append(";")
-        header.append("; 【目前无法与帧生成同时使用】实测：开了 NR 之后帧生成照常出帧")
-        header.append("; （计数器会涨到一百多），但生成的帧进不了画面 —— 观感就是原生帧率。")
-        header.append("; 要帧生成请改用「XeSS 多帧生成」那个引擎包；这个包只当神经网络渲染试用。")
+        if fg_enabled:
+            header.append("; 【本引擎自己的帧生成 + DLSS 5 NR：实测不可用】开了 NR 之后帧生成")
+            header.append("; 照常出帧（计数器会涨到一百多），但生成的帧进不了画面 —— 观感就是")
+            header.append("; 原生帧率。要帧生成请改用「XeSS 多帧生成」引擎包。")
+        else:
+            header.append("; 【本引擎的帧生成已关闭】帧生成交给 DLSSG 引擎负责，本引擎只做")
+            header.append("; DLSS 5 神经网络渲染。这样全程只有一个帧生成器，不存在抢呈现。")
+            header.append("; 注意：这个组合还没有被验证过；测出问题请保留 OptiScaler.log。")
         header.append(";")
         header.append("; DLSS 5 神经网络渲染：实验性。所用 nvngx_dlssnr.dll 为未签名、")
         header.append("; 且不在你当前驱动里的预览版组件，请自行判断是否使用。")
@@ -732,6 +753,7 @@ def make_plan(
     prev_proxy: str = "",
     high_res_mv: bool | None = None,
     fg_input: str = "upscaler",
+    fg_enabled: bool = True,
 ) -> OptiPlan:
     target_dir = Path(target_dir)
     spec = get_bundle(bundle)
@@ -740,7 +762,8 @@ def make_plan(
 
     proxy, _why = pick_proxy(target_dir, bundle, prev_proxy)
     mult = normalize_multiplier(multiplier)
-    ini_text = build_ini(bundle, mult, high_res_mv=high_res_mv, fg_input=fg_input)
+    ini_text = build_ini(bundle, mult, high_res_mv=high_res_mv, fg_input=fg_input,
+                         fg_enabled=fg_enabled)
 
     plan = OptiPlan(
         target_dir=target_dir,
@@ -1289,11 +1312,16 @@ def preflight(
     anticheat=None,
     fg_input: str = "upscaler",
     coexist: bool = False,
+    fg_enabled: bool = True,
 ) -> list[Check]:
     """OptiScaler 引擎的安装前预检。有任何 error 就不该继续。
 
     coexist:
         True 表示允许"DLSSG 引擎 + OptiScaler"共存（详见下面第 1 条）。
+    fg_enabled:
+        False 表示本引擎的帧生成会被关掉（只做 NR）。这时输入源、倍率、
+        provider 那些检查都没有意义，跳过它们 —— 否则会拿一堆用不上的
+        警告把真正要紧的提示淹掉。
     """
     from . import ueconfig
     from .state import (ENGINE_DLSSG, ENGINE_OPTISCALER, conflict_message,
@@ -1350,7 +1378,10 @@ def preflight(
     #      （日志里是 Ignoring plugin 'sl.dlss_g' since it was not requested by the host），
     #      OptiScaler 就处在一个"配置要求了但输入不存在"的状态。
     #      黑神话上这么装之后，游戏直接闪退。
-    if (fg_input or "").lower() == "dlssg":
+    #
+    #      fg_enabled=False 时整段跳过：那时本引擎不产出帧，输入源、倍率、provider
+    #      都无意义，摆一堆警告只会把真正要紧的提示淹掉。
+    if fg_enabled and (fg_input or "").lower() == "dlssg":
         # 提供方有两种可能：① 本目录装了 DLSSG 引擎（共存模式，最可靠）；
         # ② 游戏自己在主程序附近就带 DLSSG 组件。
         # 少了 ① 这条判断，共存模式会被这里直接拦死 —— 而它恰恰是最该放行的
@@ -1389,14 +1420,22 @@ def preflight(
 
     # 1.6) 输入源与共存模式的搭配建议。
     #      这两条都是"选错了不报错、只是不生效"的坑，必须在装之前说清。
-    if coexist and (fg_input or "").lower() != "dlssg":
+    if not fg_enabled:
+        out.append(Check(
+            "ok", "本引擎的帧生成已关闭：只做神经网络渲染",
+            "帧生成交给 DLSSG 引擎负责 —— 这样全程只有一个帧生成器，"
+            "不存在两个帧生成器抢呈现的问题。\n\n"
+            "记得进游戏把帧生成打开、并用叠加层快捷键开 DLSS 5 神经网络渲染。",
+        ))
+    elif coexist and (fg_input or "").lower() != "dlssg":
         out.append(Check(
             "warn", "共存模式下建议把输入源改成 dlssg",
             "既然本目录已经装了 DLSSG 引擎，游戏自身的 DLSS 帧生成通道就是可用的 ——\n"
             "用 dlssg 当输入源能绕开「运动矢量与深度分辨率不一致」那个坑。\n\n"
             "upscaler 输入只适合「游戏没有帧生成、只有超分」的场合。",
         ))
-    if (fg_input or "").lower() == "dlssg" and not (other and engine_of(other) == ENGINE_DLSSG):
+    if (fg_enabled and (fg_input or "").lower() == "dlssg"
+            and not (other and engine_of(other) == ENGINE_DLSSG)):
         out.append(Check(
             "warn", "dlssg 输入源可能没有提供方",
             "dlssg 输入取的是游戏自身 DLSSG（Streamline）通道的数据。\n"
@@ -1577,6 +1616,7 @@ def install(
     dry_run: bool = False,
     high_res_mv: bool | None = None,
     fg_input: str = "upscaler",
+    fg_enabled: bool = True,
 ) -> OptiResult:
     """完整安装流程：读状态 -> 生成计划 -> 执行 -> 记录。"""
     from .state import ENGINE_OPTISCALER, engine_of, find_install, record_install
@@ -1598,6 +1638,7 @@ def install(
         prev_proxy=prev_proxy,
         high_res_mv=high_res_mv,
         fg_input=fg_input,
+        fg_enabled=fg_enabled,
     )
 
     if dry_run:

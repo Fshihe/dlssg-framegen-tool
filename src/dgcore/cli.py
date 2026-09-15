@@ -245,6 +245,16 @@ def _coexist(args) -> bool:
     return bool(getattr(args, "coexist", False))
 
 
+def _fg_enabled(args) -> bool:
+    """本引擎（OptiScaler）自己的帧生成要不要开。
+
+    --no-fg → 关掉它，只留 DLSS 5 神经网络渲染等其它通道。
+    适用场景：帧生成交给引擎一（DLSSG），避免两个帧生成器抢呈现 ——
+    实测那样会出现"计数器在涨、画面纹丝不动"。
+    """
+    return not bool(getattr(args, "no_fg", False))
+
+
 def _oi_fg_input(args) -> str:
     """帧生成输入源。
 
@@ -283,7 +293,8 @@ def _oi_check(args, root, exe, tdir: Path) -> int:
                                   running_names=[Path(exe).name] if exe else [],
                                   anticheat=acr,
                                   fg_input=_oi_fg_input(args),
-                                  coexist=_coexist(args))
+                                  coexist=_coexist(args),
+                                  fg_enabled=_fg_enabled(args))
     _print_oi_checks(checks)
     ok = not any(c.level == "error" for c in checks)
     out("")
@@ -296,10 +307,12 @@ def _oi_plan(args, root, exe, tdir: Path) -> int:
     mult = _oi_mult(args)
     plan = optiscaler.make_plan(tdir, exe, bundle, mult, game_name=root.name,
                                 high_res_mv=_oi_hires_mv(args),
-                                fg_input=_oi_fg_input(args))
+                                fg_input=_oi_fg_input(args),
+                                fg_enabled=_fg_enabled(args))
     _hdr("将要执行的改动（预演，不会真的写入）")
     out(f"引擎包：{optiscaler.get_bundle(bundle).display_name}")
     out(f"倍率  ：{mult}X（{optiscaler.multiplier_label(mult)}）")
+    out(f"本引擎帧生成：{'开' if _fg_enabled(args) else '关（交给 DLSSG 引擎）'}")
     out(f"代理入口：{plan.proxy}")
     out("")
     for it in plan.items:
@@ -339,7 +352,8 @@ def _oi_install(args, root, exe, tdir: Path) -> int:
                                   running_names=[Path(exe).name] if exe else [],
                                   anticheat=acr,
                                   fg_input=_oi_fg_input(args),
-                                  coexist=_coexist(args))
+                                  coexist=_coexist(args),
+                                  fg_enabled=_fg_enabled(args))
     out("")
     _print_oi_checks(checks)
     errors = [c for c in checks if c.level == "error"]
@@ -365,7 +379,8 @@ def _oi_install(args, root, exe, tdir: Path) -> int:
 
     res = optiscaler.install(tdir, exe, bundle, mult, game_name=root.name,
                              high_res_mv=_oi_hires_mv(args),
-                             fg_input=_oi_fg_input(args))
+                             fg_input=_oi_fg_input(args),
+                             fg_enabled=_fg_enabled(args))
     out("")
     if not res.success:
         out(res.message)
@@ -709,6 +724,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="允许 dlssg 引擎与 optiscaler 引擎装在同一目录（进阶）。"
                              "两者各用各的代理入口，实测能同进程共存；配 "
                              "--fg-input dlssg 使用，倍率由 optiscaler 决定。")
+        sp.add_argument("--no-fg", action="store_true",
+                        help="关掉 optiscaler 引擎自己的帧生成，只留 DLSS 5 神经网络渲染"
+                             "等其它通道。配合 dlssg 引擎使用 —— 帧生成交给它，"
+                             "避免两个帧生成器抢呈现（实测那样会出现计数器在涨、"
+                             "画面纹丝不动）。")
         sp.add_argument("--bundle", choices=optiscaler.bundle_keys(),
                         help="optiscaler 引擎的引擎包（默认 xess）")
         sp.add_argument("--multiplier", type=int, default=4,

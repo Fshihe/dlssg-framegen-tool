@@ -48,10 +48,15 @@ ENGINE_CHOICE_DLSS5 = "OptiScaler · DLSS 5 神经网络渲染 + XeSS"
 
 # 选中 DLSS 5 包时摆在界面上的那段说明。只写实测到的事实和后果。
 DLSS5_WARNING = (
-    "目前无法与帧生成同时使用 —— 实测开了它之后，帧生成虽然照常出帧"
+    "严重警告：可能失效，也可能让游戏崩溃、闪退。\n"
+    "\n"
+    "· 目前无法与帧生成同时使用 —— 实测开了它之后，帧生成虽然照常出帧"
     "（计数器会涨），但生成的帧进不了画面，观感就是原生帧率。\n"
-    "另外它的模型是未签名的预览版组件，且必须在游戏内用叠加层快捷键开启"
-    "（写进 ini 会被回写、下次启动游戏可能起不来）。"
+    "· 所用模型是未签名的预览版组件，且不在你当前驱动里。\n"
+    "· 必须在游戏内用叠加层快捷键开启（写进 ini 会被回写，"
+    "而那个值会让下一次启动的游戏直接退出）。\n"
+    "\n"
+    "只在你清楚这些后果、并且愿意自己承担的时候再勾。出问题直接卸载即可还原。"
 )
 
 
@@ -111,6 +116,8 @@ class App(tk.Tk):
             ENGINE_CHOICE_DLSS5: (state.ENGINE_OPTISCALER, "optiscaler-dlss5"),
         }
         self.engine_var = tk.StringVar(value=ENGINE_CHOICE_DLSSG)
+        # 引擎是否已按显卡自动定过。用户自己改过之后就不再覆盖他的选择。
+        self._engine_autoset = False
         # 实验性那段警告的换行宽度，跟着窗口走（见 _on_wrap）
         self._wrap_w = 0
 
@@ -284,10 +291,13 @@ class App(tk.Tk):
         ttk.Button(bar, text="浏览游戏文件夹…", command=self.browse_game).grid(row=0, column=0)
         ttk.Button(bar, text="直接指定游戏主程序…", command=self.browse_exe).grid(row=0, column=1, padx=(6, 0))
         ttk.Button(bar, text="重新扫描游戏库", command=self.scan_games).grid(row=0, column=2, padx=(6, 0), sticky="w")
-        ttk.Checkbutton(
+        # 只对 DLSSG 引擎有意义：那个引擎的成败取决于游戏自带不带 DLSS 帧生成。
+        # XeSS 引擎靠超分输入插帧，跟这个无关，所以选 XeSS 时这一项置灰。
+        self.filter_check = ttk.Checkbutton(
             bar, text="只显示能开启帧生成的", variable=self.filter_var,
             command=self._apply_filter,
-        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
+        )
+        self.filter_check.grid(row=0, column=3, sticky="w", padx=(12, 0))
         self.scan_status = ttk.Label(bar, text="", font=FONT, foreground=C_DIM)
         self.scan_status.grid(row=0, column=4, sticky="e")
 
@@ -404,6 +414,17 @@ class App(tk.Tk):
         )
         self.coexist_check.grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
+        # 只留神经网络渲染、关掉本引擎的帧生成。
+        # 用途：帧生成交给 DLSSG 引擎（帕鲁上唯一被验证"生成的帧真的进了画面"的
+        # 那个），OptiScaler 只做 DLSS 5 NR。两个帧生成器同时工作时会抢呈现 ——
+        # 实测 OptiScaler 算出来的帧进不了画面（计数器在涨、观感是原生帧率）。
+        self.nofg_var = tk.BooleanVar(value=False)
+        self.nofg_check = ttk.Checkbutton(
+            opt, text="关掉本引擎的帧生成，只做神经网络渲染（帧生成交给 DLSSG 引擎）",
+            variable=self.nofg_var,
+        )
+        self.nofg_check.grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
         # ---------------- 操作按钮（属于「游戏与安装」页） ----------------
         act = ttk.Frame(tab_game)
         act.grid(row=2, column=0, sticky="ew", pady=(10, 0))
@@ -504,11 +525,39 @@ class App(tk.Tk):
 
         def done(env: gpu.EnvReport):
             self.env = env
+            self._autoselect_engine()
             self._render_env()
             self._set_status("环境检测完成")
             self.scan_games()
 
         self._run(work, done, status="正在检测显卡与驱动…")
+
+    def _autoselect_engine(self) -> None:
+        """按显卡自动选引擎：RTX 20/30 → DLSSG，其余 → XeSS。
+
+        为什么这么分：DLSSG 引擎走的是 NVIDIA 的 DLSS 帧生成运行库，只有
+        N 卡能用；A 卡 / I 卡 / 核显只能走 XeSS（OptiScaler）。所以检测到什么
+        卡就用什么引擎，省掉"选错引擎、装完没效果"这一整类问题。
+
+        只在用户没手动改过的时候自动定；改过就不再覆盖 —— 他可能有自己的理由。
+        """
+        if self._engine_autoset:
+            return
+        env = self.env
+        g = env.primary if env else None
+
+        if g is not None and g.verdict == VERDICT_OK:
+            # RTX 20/30（SM75/SM86）：DLSSG 引擎是成熟路径
+            want = ENGINE_CHOICE_DLSSG
+        else:
+            # 其余情况一律走 XeSS：A 卡 / I 卡 / 没有 N 卡 / N 卡架构不支持本 Mod
+            want = ENGINE_CHOICE_XESS
+
+        if self.engine_var.get() != want:
+            self.engine_var.set(want)
+            self._sync_engine_widgets()
+        self._engine_autoset = True
+        self._log(f"按显卡自动选择引擎：{want}")
 
     def _render_env(self) -> None:
         env = self.env
@@ -516,8 +565,13 @@ class App(tk.Tk):
             return
         g = env.primary
         if g is None:
-            bg, fg, title = C_BG_ERR, C_ERR, "✗ 没有检测到 NVIDIA 显卡"
-            detail = "本 Mod 依赖 NVIDIA 驱动提供的 NGX / NVAPI / CUDA 接口，A 卡与核显无法使用。"
+            # A 卡 / I 卡 / 核显没有 DLSS 帧生成，但有 XeSS 那条路
+            bg, fg, title = C_BG_WARN, C_WARN, "没有检测到 NVIDIA 显卡"
+            detail = (
+                "DLSSG 引擎用不了（它依赖 NVIDIA 驱动提供的 NGX / NVAPI / CUDA 接口）。\n"
+                "已经自动切到 XeSS 引擎 —— 它靠显卡的超分能力插帧，A 卡 / I 卡 / 核显也能试。\n"
+                "XeSS 的实际效果很依赖具体游戏和驱动环境，装完请自己进游戏确认有没有生效。"
+            )
         elif g.verdict == VERDICT_OK:
             bg, fg = C_BG_OK, C_OK
             title = f"✓ 你的显卡可以用：{g.name}"
@@ -530,6 +584,15 @@ class App(tk.Tk):
             bg, fg = C_BG_WARN, C_WARN
             title = f"⚠ 不需要这个工具：{g.name}"
             detail = g.reason + "\n在游戏的画面设置里直接打开「帧生成」即可。"
+        elif g.name and not g.router:
+            # N 卡但不在本 Mod 覆盖范围（比 20 系更老、或更特殊）→ 退到 XeSS
+            bg, fg = C_BG_WARN, C_WARN
+            title = f"⚠ DLSSG 用不了：{g.name}"
+            detail = (
+                f"{g.family or '未知架构'}　驱动 {g.driver or '未知'}\n{g.reason}\n"
+                "已经自动切到 XeSS 引擎 —— XeSS 不依赖本 Mod 的 NVIDIA 内核，"
+                "可以试。实际效果请自己进游戏确认。"
+            )
         else:
             bg, fg = C_BG_ERR, C_ERR
             title = f"✗ 显卡不受支持：{g.name}"
@@ -596,25 +659,47 @@ class App(tk.Tk):
 
         def done(libs: list[games.Game]):
             self.game_list = libs
-            n_ok = sum(1 for g in libs if g.best and g.best.eligible)
-            self._log(f"扫描完成（「{preset}」档）：发现 {len(libs)} 个游戏，其中 {n_ok} 个可以开启帧生成")
+            if self._list_only_fg():
+                n_ok = sum(1 for g in libs if g.best and g.best.eligible)
+                self._log(f"扫描完成（「{preset}」档）：发现 {len(libs)} 个游戏，"
+                          f"其中 {n_ok} 个可以开启帧生成")
+            else:
+                # XeSS 引擎不看游戏自带帧生成，所以不报"几个能开"
+                self._log(f"扫描完成（「{preset}」档）：发现 {len(libs)} 个游戏"
+                          "（XeSS 引擎：能不能用取决于游戏有没有可钩的超分）")
             self._set_status(f"已扫描到 {len(libs)} 个游戏")
             self._apply_filter()
 
         self._run(work, done, status=f"正在按「{preset}」档扫描游戏库…")
 
+    def _list_only_fg(self) -> bool:
+        """游戏列表要不要按「能开帧生成」筛选/标注。
+
+        只有 DLSSG 引擎才这么标：那个引擎的成败取决于游戏自带不带 DLSS 帧生成
+        组件（nvngx_dlssg.dll）。XeSS 引擎不看这个 —— 它靠超分输入插帧，
+        游戏有没有帧生成跟它能不能用是两回事。混在一起标会让人以为
+        「没★ 就是不能用」，而实际上 XeSS 很可能能跑。
+        """
+        engine, _bundle = self._current_engine()
+        return engine != state.ENGINE_OPTISCALER
+
     def _apply_filter(self) -> None:
         self.listbox.delete(0, "end")
-        only = self.filter_var.get()
+        per_fg = self._list_only_fg()
+        only = self.filter_var.get() and per_fg
         shown = 0
         for g in self.game_list:
             b = g.best
             if only and not (b and b.eligible):
                 continue
-            mark = "★ " if (b and b.eligible) else "· "
+            mark = ("★ " if (b and b.eligible) else "· ") if per_fg else ""
             self.listbox.insert("end", f"{mark}{g.name}")
             shown += 1
-        self._log(f"列表显示 {shown} 个游戏" + ("（已过滤掉不支持的）" if only else ""))
+        if per_fg:
+            self._log(f"列表显示 {shown} 个游戏" + ("（已过滤掉不支持的）" if only else ""))
+        else:
+            self._log(f"列表显示 {shown} 个游戏（XeSS 引擎：不看游戏自带帧生成，"
+                      "全部列出）")
         self.scan_status.configure(text=f"{shown} / {len(self.game_list)}")
         if shown:
             self.listbox.selection_clear(0, "end")
@@ -622,7 +707,7 @@ class App(tk.Tk):
             self._on_select()
 
     def _current_list(self) -> list[games.Game]:
-        only = self.filter_var.get()
+        only = self.filter_var.get() and self._list_only_fg()
         if not only:
             return list(self.game_list)
         return [g for g in self.game_list if g.best and g.best.eligible]
@@ -632,8 +717,11 @@ class App(tk.Tk):
         self._sync_profile_widgets()
 
     def _on_engine_change(self, _evt=None) -> None:
+        # 用户自己动过下拉框 → 之后环境重检不再覆盖他的选择
+        self._engine_autoset = True
         self._sync_engine_widgets()
         self._render_detail()
+        self._apply_filter()
 
     def _on_dlss5_toggle(self) -> None:
         """「实验性」勾选框：勾上就换成 DLSS 5 包，取消就退回 XeSS 包。
@@ -703,6 +791,13 @@ class App(tk.Tk):
                 w.configure(state="disabled" if is_opti else "readonly")
             except tk.TclError:
                 pass
+        # 「只显示能开启帧生成的」只在 DLSSG 引擎下有意义 ——
+        # XeSS 引擎不看游戏自带帧生成，留着这个勾选框会让人以为过滤掉的是不能用的
+        try:
+            self.filter_check.configure(
+                state="disabled" if is_opti else "normal")
+        except tk.TclError:
+            pass
         # HighResMV 是 OptiScaler 专有开关，DLSSG 引擎下无意义
         try:
             self.hiresmv_check.configure(state="normal" if is_opti else "disabled")
@@ -711,6 +806,12 @@ class App(tk.Tk):
         # 共存模式同理：它描述的是 OptiScaler 引擎怎么和 DLSSG 引擎搭配
         try:
             self.coexist_check.configure(state="normal" if is_opti else "disabled")
+        except tk.TclError:
+            pass
+        # 「只做神经网络渲染」只有 DLSS 5 包才有意义 —— 别的包关掉帧生成等于什么都不做
+        try:
+            self.nofg_check.configure(
+                state="normal" if (is_opti and bundle == "optiscaler-dlss5") else "disabled")
         except tk.TclError:
             pass
         # 实验性区块：勾选框状态始终跟着当前引擎走，那段警告只在真的选中
@@ -991,8 +1092,10 @@ class App(tk.Tk):
             self.prediction = None
         elif not elig:
             b = cands[0]
-            self.prediction = capability.predict(
-                b.name, b.directory, b.api_level, False, g.name
+            # XeSS 引擎下不摆"这游戏有没有帧生成"的判断 —— 那是 DLSSG 引擎的判据
+            self.prediction = (
+                capability.predict(b.name, b.directory, b.api_level, False, g.name)
+                if self._list_only_fg() else None
             )
             self._render_prediction(self.prediction)
             self.detail.insert("end", f"\n　主程序 {b.name}\n", "mono")
@@ -1004,9 +1107,11 @@ class App(tk.Tk):
             self.detail.insert("end", f"✓ 已定位主程序（{b.confidence}）\n", "ok")
             self.detail.insert("end", f"　{b.path}\n", "mono")
 
-            # 能力预判：这是评论区「装了才发现游戏没有帧生成」的对策
-            self.prediction = capability.predict(
-                b.name, b.directory, b.api_level, b.eligible, g.name
+            # 能力预判：这是评论区「装了才发现游戏没有帧生成」的对策。
+            # 只对 DLSSG 引擎显示 —— XeSS 引擎不依赖游戏自带帧生成。
+            self.prediction = (
+                capability.predict(b.name, b.directory, b.api_level, b.eligible, g.name)
+                if self._list_only_fg() else None
             )
             self._render_prediction(self.prediction)
 
@@ -1168,6 +1273,18 @@ class App(tk.Tk):
         """
         return "dlssg" if self._opti_coexist() else "upscaler"
 
+    def _fg_enabled(self) -> bool:
+        """本引擎（OptiScaler）自己的帧生成要不要开。
+
+        关掉它 = 只留 DLSS 5 神经网络渲染，帧生成交给引擎一（DLSSG）。
+        这是"全程只有一个帧生成器"的组合：实测两个帧生成器同时工作时，
+        OptiScaler 算出来的帧进不了画面（计数器在涨、观感是原生帧率）。
+        """
+        try:
+            return not bool(self.nofg_var.get())
+        except (AttributeError, tk.TclError):
+            return True
+
     def _opti_preflight(self, target_dir: Path, bundle: str, quiet: bool = False):
         acr = ac.scan(self.selected.root)
         checks = optiscaler.preflight(
@@ -1176,6 +1293,7 @@ class App(tk.Tk):
             anticheat=acr,
             fg_input=self._opti_fg_input(),
             coexist=self._opti_coexist(),
+            fg_enabled=self._fg_enabled(),
         )
         if not quiet:
             self._log("—" * 30)
@@ -1194,7 +1312,8 @@ class App(tk.Tk):
                                     self._current_multiplier(),
                                     game_name=self.selected.name,
                                     high_res_mv=bool(self.hiresmv_var.get()),
-                                    fg_input=self._opti_fg_input())
+                                    fg_input=self._opti_fg_input(),
+                                    fg_enabled=self._fg_enabled())
         spec = optiscaler.get_bundle(bundle)
         lines = [
             f"安装目录：{target_dir}",
@@ -1202,6 +1321,7 @@ class App(tk.Tk):
             f"倍率：{self._current_multiplier()}X",
             f"帧生成输入源：{self._opti_fg_input()}"
             + ("（共存模式）" if self._opti_coexist() else ""),
+            f"本引擎帧生成：{'开' if self._fg_enabled() else '关（只做神经网络渲染）'}",
             f"代理入口：{plan.proxy}",
             "",
         ]
@@ -1275,7 +1395,8 @@ class App(tk.Tk):
         def work():
             return optiscaler.install(target_dir, self.chosen_exe, bundle, mult,
                                       game_name=game, high_res_mv=hires,
-                                      fg_input=self._opti_fg_input())
+                                      fg_input=self._opti_fg_input(),
+                                      fg_enabled=self._fg_enabled())
 
         def done(res):
             if not res.success:

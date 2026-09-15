@@ -1103,6 +1103,17 @@ def run(verbose: bool = True) -> Runner:
         r.check("OptiScaler INI：DLSS 5 的 DlssNr.Enabled 明确写 false（不能留 auto）",
                 _section_has(ini5, "DlssNr", "Enabled", "false"), "")
 
+        # 帧生成可以整个关掉（fg_enabled=False）：帧生成交给引擎一，本引擎只做 NR。
+        # 为什么需要：两个帧生成器同时工作会抢呈现，实测 OptiScaler 算出来的帧
+        # 进不了画面（计数器在涨、观感是原生帧率）。
+        ini_nofg = oi.build_ini("optiscaler-dlss5", 4, fg_enabled=False)
+        r.check("OptiScaler INI：可以关掉本引擎的帧生成",
+                _section_has(ini_nofg, "FrameGen", "Enabled", "false"), "")
+        r.check("OptiScaler INI：关掉帧生成时不再强改窗口模式",
+                _section_has(ini_nofg, "XeFG", "ForceBorderless", "false"), "")
+        r.check("OptiScaler INI：默认仍然开着帧生成",
+                _section_has(ini5, "FrameGen", "Enabled", "true"), "")
+
         # 帧生成 provider 齐全性 —— 残包必须在安装前就被拦住。
         # 教训：DLSS 5 那个包的 provider 在 Optiscaler\ 子目录里，提取白名单却照抄了
         # 版本 2 的根目录写法，于是产出一个做不了帧生成的残包；工具照样设

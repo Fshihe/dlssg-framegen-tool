@@ -34,7 +34,7 @@ from __future__ import annotations
 
 APP_NAME = "DLSSG 帧生成一键开启工具"
 APP_ID = "dlssg-sm86-tool"
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 # 上游 Mod 版本（payload 来源）
 UPSTREAM_NAME = "DLSSG Native"
