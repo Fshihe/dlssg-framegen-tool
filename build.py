@@ -32,7 +32,7 @@ from dgcore import profiles  # noqa: E402
 from dgcore import VERSION as APP_VERSION  # noqa: E402
 
 # 产物名一律用 ASCII —— 中文名在 GitHub Release、部分解压工具和国外网盘上会乱码
-APP_BASENAME = "dlssg-cn"
+APP_BASENAME = "framegen-unlock"
 
 
 def sha256(path: Path) -> str:
@@ -213,7 +213,7 @@ def write_checksums(exe: Path) -> Path:
     digest = sha256(exe)
     out = DIST / "SHA256SUMS.txt"
     lines = [
-        f"# dlssg-cn  v{APP_VERSION}",
+        f"# framegen-unlock  v{APP_VERSION}",
         "# 引擎一 DLSSG：RTX 30 系走 0.3.0（6X），RTX 20 系走 0.2.4（4X）",
         "# 引擎二 OptiScaler：XeSS 多帧生成 / DLSS 5 神经网络渲染（与引擎一互斥）",
         "# 上游：https://github.com/sdli1995/dlssg_for_sm86",
