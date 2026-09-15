@@ -43,6 +43,11 @@ from .profiles import OUR_INI_MARKER, TOOL_NAME_LINE
 
 ENGINE = "optiscaler"
 
+# 帧生成输出。目前只做 XeFG 一条：它不要求游戏自带帧生成组件，
+# 覆盖面最广（这也是 A 卡 / I 卡用户唯一能走的路）。
+# 生成配置与预检都从这里取值，避免"配置写了 XeFG、预检却在查别的输出"这种脱钩。
+FG_OUTPUT = "xefg"
+
 # 落盘的配置文件名（OptiScaler 认这名字）
 INI_NAME = "OptiScaler.ini"
 
@@ -234,6 +239,32 @@ def bundle_available(key: str) -> tuple[bool, str]:
     return True, f"{len(spec.files)} 个文件齐全（{mb:.1f} MB）"
 
 
+# FGOutput=xefg 运行时必须能加载到的文件。
+# 只比文件名、不比目录 —— 上游不同包把它们放在根目录或 Optiscaler\ 子目录，
+# 两种都算齐（OptiScaler 的 OptiDllPath 默认就是 .\OptiScaler）。
+_XEFG_PROVIDERS = ("libxess_fg.dll", "libxell.dll", "fakenvapi.dll")
+
+
+def missing_fg_providers(spec: "BundleSpec", fg_output: str = "xefg") -> list[str]:
+    """检查 bundle 里有没有该帧生成输出所需的 provider。缺了就返回缺的文件名。
+
+    为什么需要这道检查
+    ------------------
+    DLSS 5 那个包的 provider 在 `Optiscaler\\` 子目录里，而提取白名单一度照抄了
+    版本 2 的根目录写法，结果一个都没收进来 —— 产出的是个做不了帧生成的残包。
+    工具照样设 FGOutput=XeFG，装完进游戏才报：
+
+        Can't find libxess_fg.dll, returning nullptr!
+
+    然后因为 XeFG 建不起来、OptiScaler 停在无效状态，游戏十秒内就崩了。
+    这种"装完才炸"的体验必须提前拦在安装前。
+    """
+    if (fg_output or "").lower() != "xefg":
+        return []
+    have = {Path(rel).name.lower() for rel, _h, _s in spec.files}
+    return [n for n in _XEFG_PROVIDERS if n.lower() not in have]
+
+
 # --------------------------------------------------------------------------
 # INI 生成：在 bundle 自带模板上做定点修改
 # --------------------------------------------------------------------------
@@ -355,7 +386,7 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
         fg_in = "upscaler"
     text = _set_in_section(text, "FrameGen", "Enabled", "true")
     text = _set_in_section(text, "FrameGen", "FGInput", fg_in)
-    text = _set_in_section(text, "FrameGen", "FGOutput", "xefg")
+    text = _set_in_section(text, "FrameGen", "FGOutput", FG_OUTPUT)
     text = _set_in_section(text, "FrameGen", "FGNvngxReplacement", "None")
 
     # 倍率与解锁
@@ -371,8 +402,22 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
     if high_res_mv is not None:
         text = _set_in_section(text, "XeFG", "HighResMV", "true" if high_res_mv else "false")
 
-    if key == "optiscaler-dlss5":
-        text = _set_in_section(text, "DlssNr", "Enabled", "true")
+    # [DlssNr]（DLSS 5 神经网络渲染）明确写 false —— 不要默认打开。
+    #
+    # 上游模板对这个通道的原话是：「游戏内开关本通道的按键虚码，默认未绑定，
+    # 请在叠加层的快捷键设置中绑定，不要手填」—— 它的设计用法就是在游戏里开。
+    #
+    # 黑神话实测（RTX 3070），三种取值：
+    #   Enabled=true  启动即用 → 游戏 2 秒 ~ 14 秒就退出（日志停在 Init done 之后
+    #                 紧接着 DLL_PROCESS_DETACH，2/2 复现）。这是"闪退"的真身。
+    #   Enabled=auto  启动时跳过（日志：DLSS-NR did not run: it is switched off），
+    #                 游戏跑起来后通道会自己接上 —— 然后把这个 true 持久化回 ini，
+    #                 于是**下一次启动就变成会死的那种配置**。
+    #   Enabled=false 启动不碰；用户在游戏内用快捷键打开后能稳定运行（实测 70 秒以上）。
+    #
+    # 还有一个绕不开的坑必须写进头部告诉用户：只要 NR 真的跑起来过，OptiScaler
+    # 就会把这一项回写成 true，下次启动前必须改回 false（或重装），否则游戏起不来。
+    text = _set_in_section(text, "DlssNr", "Enabled", "false")
 
     # 让 OptiScaler 不要去找我们没装的 provider（少一次无用探测）
     text = _set_in_section(text, "Plugins", "LoadAsiPlugins", "false")
@@ -414,6 +459,14 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
         header.append(";")
         header.append("; DLSS 5 神经网络渲染：实验性。所用 nvngx_dlssnr.dll 为未签名、")
         header.append("; 且不在你当前驱动里的预览版组件，请自行判断是否使用。")
+        header.append(";")
+        header.append("; [DlssNr] Enabled 已写成 false —— 本工具不替你打开它。")
+        header.append("; 想用就在游戏里按叠加层的快捷键开（那个键要先在叠加层里绑好）。")
+        header.append(";")
+        header.append("; 注意这个坑：只要 NR 真的跑起来过，OptiScaler 会把这里回写成 true，")
+        header.append("; 而 true 会让**下一次启动的游戏直接退出**（实测：日志停在 Init done")
+        header.append("; 之后紧接着 DLL_PROCESS_DETACH）。下次启动前记得改回 false，")
+        header.append("; 或者重装一次本引擎包。")
     header.append("; " + "=" * 66)
     header.append("")
 
@@ -1030,13 +1083,23 @@ def uninstall(target_dir: str | Path, record: dict, force: bool = False) -> Opti
             res.message += f"还原 {rel} 失败：{exc}；"
 
     # 清掉我们建的空目录（只删空的，游戏自己的内容一律不动）
+    #
+    # 目录名不写死：从清单里每个文件的父目录往上推，深的先删。
+    # 踩过的坑：这段原本只硬编码了两个路径（D3D12_Optiscaler 那两个），
+    # 后来 DLSS 5 包新增了 Optiscaler\ 与 Optiscaler\streamline\ 两棵子树，
+    # 卸载后它们空着不走，留下两个空文件夹 —— "卸载即净"的承诺就破了。
     cleaned: list[str] = []
-    for rel in (LICENSE_DIR, "D3D12_Optiscaler"):
-        d = target_dir / rel
+    todo: set[Path] = set()
+    for rel in recorded:
+        d = (target_dir / rel).parent
+        while d != target_dir and target_dir in d.parents:
+            todo.add(d)
+            d = d.parent
+    for d in sorted(todo, key=lambda x: -len(x.parts)):
         try:
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
-                cleaned.append(rel)
+                cleaned.append(d.relative_to(target_dir).as_posix())
         except OSError:
             pass
 
@@ -1376,6 +1439,22 @@ def preflight(
         out.append(Check("ok", "内置引擎包完整性校验通过", f"{spec.display_name}：{msg}"))
     else:
         out.append(Check("error", "内置引擎包校验失败", msg))
+
+    # 10b) 帧生成输出所需的 provider 必须真的在这个包里。
+    #      曾经这里缺了一道检查：DLSS 5 那个包的 provider 在 Optiscaler\ 子目录，
+    #      提取白名单却照抄了版本 2 的根目录写法 → 残包 → 装完进游戏才报
+    #      "Can't find libxess_fg.dll"，接着因为 XeFG 建不起来把游戏弄崩。
+    lack = missing_fg_providers(spec, FG_OUTPUT)
+    if lack:
+        out.append(Check(
+            "error", "引擎包里缺帧生成所需的 provider",
+            f"本包要输出 {FG_OUTPUT}，但下列文件不在 bundle 里：\n  · "
+            + "\n  · ".join(lack)
+            + "\n\n缺 provider 时 OptiScaler 会停在无效状态，实测会让游戏闪退。\n"
+            "请用 tools/fetch_optiscaler.py 重新提取引擎包（不要手改 payload）。",
+        ))
+    else:
+        out.append(Check("ok", "帧生成 provider 齐全"))
 
     # 8) 倍率
     mult = normalize_multiplier(multiplier)

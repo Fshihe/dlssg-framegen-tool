@@ -100,10 +100,37 @@ BUNDLE_SOURCES: dict[str, dict] = {
         "display_name": "DLSS 5 神经网络渲染 + XeSS 多帧生成（OptiScaler）",
         "keywords": ["DLSS5"],
         "exclude": [],
-        "allow": list(_COMMON) + [
-            "nvngx_dlssnr.dll",         # DLSS 5 模型本体（158 MB，未签名）
-            "nvngx.dll_dlssnr.dll",     # 转发器：模块路径必须含 "nvngx.dll" 才放行
+        # 这个包的目录结构和版本 2 不一样：provider 不在根目录，而在
+        # Optiscaler\ 子目录里。原因见模板 [Libraries] 的注释 ——
+        # 「OptiDllPath 默认为 .\OptiScaler」，也就是 OptiScaler 本来就是在
+        # 这个子目录里找这些 dll 的。
+        #
+        # 曾经踩过的坑：白名单照抄版本 2（写根目录的 libxess_fg.dll 等），
+        # 于是这些文件一个都没匹配到、静默跳过，产出的是一个做不了帧生成的
+        # 残包 —— 装进游戏后 OptiScaler 报 "Can't find libxess_fg.dll"，
+        # 然后因为 FGOutput=XeFG 建不起来而把游戏弄崩。
+        "allow": [
+            "dxgi.dll",
+            "OptiScaler.ini",
+            "nvngx_dlssnr.dll",             # DLSS 5 模型本体（158 MB，未签名）
+            "nvngx.dll_dlssnr.dll",         # 转发器：模块路径必须含 "nvngx.dll" 才放行
+            "D3D12_Optiscaler/**",
+            "Licenses/**",
+            # FGOutput = xefg 需要的 provider（23.8 MB）
+            "Optiscaler/libxess_fg.dll",
+            "Optiscaler/libxell.dll",
+            "Optiscaler/fakenvapi.dll",
+            "Optiscaler/fakenvapi.ini",
+            # FGOutput = dlssg（DLSS 帧生成输出槽）需要（12.6 MB）
+            "Optiscaler/streamline/**",
+            "Optiscaler/dlssg_to_fsr3_amd_is_better.dll",   # FGNvngxReplacement=Nukems
         ],
+        # 这个包里还有这些"别的输出路径"的 provider，出于体积没收录。
+        # 需要时把它们加进上面的 allow 即可（括号内为体积）：
+        #   Optiscaler/dlss-enabler-headless.dll            (31 MB)  Arturs / FSR3 MFG
+        #   Optiscaler/amd_fidelityfx_*.dll                 (78 MB)  FGOutput=fsrfg / FFX / Combo
+        #   Optiscaler/libxess.dll + libxess_dx11.dll       (78 MB)  XeSS 超分输入 / DX11
+        "excluded_note": "dlss-enabler-headless / amd_fidelityfx_* / libxess*（见源码注释）",
     },
 }
 

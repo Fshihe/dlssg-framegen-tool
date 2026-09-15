@@ -1089,10 +1089,38 @@ def run(verbose: bool = True) -> Runner:
         r.check("OptiScaler INI：2X 时 InterpolationCount=1",
                 _section_has(ini2, "XeFG", "InterpolationCount", "1"), "")
 
-        # DLSS 5 包要显式打开 DlssNr
+        # DLSS 5 包**不**替用户打开 DlssNr —— 而且明确写 false，不能留 auto。
+        # 教训链（黑神话，RTX 3070 实测）：
+        #   Enabled=true   启动即用 → 游戏 2~14 秒退出（日志停在 Init done 后紧跟
+        #                  DLL_PROCESS_DETACH），2/2 复现。这就是"闪退"的真身。
+        #   Enabled=auto   启动时跳过，但游戏跑起来后通道会自己接上，并把 true
+        #                  持久化回 ini → 下一次启动变成会死的那种配置。
+        #   Enabled=false  启动不碰；用户在游戏内用快捷键打开能稳定跑 70 秒以上。
+        # 上游模板本来也写着这个通道"请在叠加层的快捷键设置中绑定，不要手填"。
         ini5 = oi.build_ini("optiscaler-dlss5", 4)
-        r.check("OptiScaler INI：DLSS 5 包打开 DlssNr.Enabled",
-                _section_has(ini5, "DlssNr", "Enabled", "true"), "")
+        r.check("OptiScaler INI：DLSS 5 包不替用户打开 DlssNr.Enabled",
+                not _section_has(ini5, "DlssNr", "Enabled", "true"), "")
+        r.check("OptiScaler INI：DLSS 5 的 DlssNr.Enabled 明确写 false（不能留 auto）",
+                _section_has(ini5, "DlssNr", "Enabled", "false"), "")
+
+        # 帧生成 provider 齐全性 —— 残包必须在安装前就被拦住。
+        # 教训：DLSS 5 那个包的 provider 在 Optiscaler\ 子目录里，提取白名单却照抄了
+        # 版本 2 的根目录写法，于是产出一个做不了帧生成的残包；工具照样设
+        # FGOutput=XeFG，装完进游戏才报 "Can't find libxess_fg.dll"，
+        # 接着因为 XeFG 建不起来把游戏弄崩。
+        _mfp = oi.missing_fg_providers
+        for _k in ("optiscaler-xess", "optiscaler-dlss5"):
+            _lack = _mfp(oi.get_bundle(_k))
+            r.check(f"引擎包：{_k} 的 XeFG provider 齐全", _lack == [], str(_lack))
+
+        class _Bare:
+            files = (("dxgi.dll", "x", 1),)
+
+        r.check("引擎包：provider 缺失时能逐个报出来",
+                _mfp(_Bare()) == ["libxess_fg.dll", "libxell.dll", "fakenvapi.dll"],
+                str(_mfp(_Bare())))
+        r.check("引擎包：非 XeFG 输出不查 provider",
+                _mfp(_Bare(), fg_output="nofg") == [], "")
 
         # 19b-2. HighResMV / 帧生成输入源 / 日志开关
         #   关于 HighResMV 的教训：一度把它默认设成 true，理由是"黑神话实测 0 报错"。
