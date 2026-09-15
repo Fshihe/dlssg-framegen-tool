@@ -117,8 +117,12 @@ CRLF/LF、空文件、无换行结尾等 8 种输入的**逐字节往返比对**
 
 - **XeFG 不支持 Vulkan**
 - **黑神话的 DLSSG 输入需要 [OptiPatcher](https://github.com/optiscaler/OptiPatcher)**（第三方 ASI 插件，本工具未包含）
-- 帕鲁里 Streamline 自己拒绝了 DLSS-G（`not supported on current hardware`）——
-  RTX 30 不是 Ada，所以帕鲁只能用 `upscaler` 输入
+- **帕鲁上引擎二开不了帧生成，改用引擎一即可（实测 4X 正常）。**
+  原因不是显卡。帕鲁在加载世界时会把 `r.NGX.DLSS.DilateMotionVectors` 顶回膨胀状态，
+  而 shipping 版本里改配置这条路基本堵死：`[SystemSettings]` 优先级不够，
+  `ConsoleVariables.ini` 和 `-execcmds` 在 shipping 构建里整段被编译掉。
+  日志里 Streamline 那句 `not supported on current hardware` 是真的，但引擎一是在
+  NGX 层把游戏调用的运行库整个换掉，不经过这道门，所以照样能开。
 - `--fg-input dlssg` 需要**先在游戏里打开帧生成**，否则 OptiScaler 会处于无效状态。
   实测这个状态会让游戏闪退，所以工具会在预检阶段拦住
 
