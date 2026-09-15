@@ -124,7 +124,7 @@ PROFILE_030 = Profile(
     ),
     adapters=(
         ProxyEntry("version.dll", "version.dll", "tool", "上游默认入口"),
-        ProxyEntry("winmm.dll", "alternatives/winmm.dll", "tool", "第二选择，推荐"),
+        ProxyEntry("winmm.dll", "alternatives/winmm.dll", "tool", "第二选择"),
         ProxyEntry("dbghelp.dll", "alternatives/dbghelp.dll", "tool", "崩溃/符号库，多数游戏或反作弊会加载"),
         ProxyEntry("dinput8.dll", "alternatives/dinput8.dll", "tool", "DirectInput8"),
         ProxyEntry("dxgi.dll", "alternatives/dxgi.dll", "render", "渲染路径入口，仅在上面的都不行时用"),

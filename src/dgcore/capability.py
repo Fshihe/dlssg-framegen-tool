@@ -25,9 +25,9 @@ class Support(str, Enum):
     @property
     def label(self) -> str:
         return {
-            Support.GOOD: "大概率可以开启",
-            Support.MAYBE: "可以试一下",
-            Support.UNLIKELY: "大概率没有帧生成功能",
+            Support.GOOD: "检测到帧生成组件",
+            Support.MAYBE: "未检测到 DLSS 组件",
+            Support.UNLIKELY: "未检测到帧生成组件",
             Support.NO: "不支持",
         }[self]
 
@@ -246,9 +246,8 @@ SR_COMPONENTS = ("nvngx_dlss.dll", "sl.dlss.dll", "nvngx_dlssd.dll")
 #
 # 按上游说明：实际生成帧数由游戏请求，并钳到运行库上限。
 MULTIPLIER_NOTE = (
-    "注意：「最高倍率」只是个上限，实际用几倍由游戏决定。\n"
-    "游戏只有「开/关」没有倍率选项的话（黑神话就是这样），"
-    "它固定按 2X 跑，改上限不会有变化 —— 这是游戏侧的限制。"
+    "「最高倍率」是上限，实际生成几帧由游戏请求决定。\n"
+    "游戏只有「开/关」时固定按 2X 请求，改上限不改变生成帧数。"
 )
 
 
@@ -272,13 +271,13 @@ def predict(
         p.level = Support.NO
         if api_level == "vulkan":
             p.headline = "这个游戏走 Vulkan，当前版本不支持"
-            p.advice = "上游把 Vulkan 支持排在后续版本，本工具暂时无能为力。"
+            p.advice = "上游尚未提供 Vulkan 支持。"
         elif api_level == "d3d11_only":
             p.headline = "这个游戏只支持 D3D11"
-            p.advice = "帧生成需要 D3D12。可以看看游戏设置里有没有 DX12 模式，有的话切过去再试。"
+            p.advice = "帧生成需要 D3D12 渲染路径。"
         else:
             p.headline = "无法确认这个游戏用 D3D12 渲染"
-            p.advice = "可以试着安装看看，但成功率不高。"
+            p.advice = ""
         p.reasons.append(f"图形 API 判定：{api_level}")
         return p
 
@@ -292,8 +291,8 @@ def predict(
             p.level = Support.UNLIKELY
             p.headline = note
             p.advice = (
-                "这类游戏可以试试本工具，但游戏没做的功能工具也变不出来。\n"
-                "如果游戏设置里本来就有「帧生成」选项（哪怕灰着），成功率会高很多。"
+                "扫描到的帧生成组件不能代表游戏把这个功能放进了画面设置。\n"
+                "游戏未实现的通道，本工具无法补上。"
             )
             p.reasons.append(note)
             return p
@@ -312,19 +311,15 @@ def predict(
         no_mult = _known_no_multiplier(exe_name, game_name)
         if no_mult:
             p.headline = f"{no_mult}带了帧生成组件，但只有「开/关」没有倍率选择"
-            p.reasons.append(f"{no_mult}的帧生成是二选一开关，固定按 2X 跑")
+            p.reasons.append(f"{no_mult}的帧生成是二选一开关，固定按 2X 请求")
             p.advice = (
-                "装完完全退出游戏再启动，在画面设置里打开「帧生成」。\n"
-                f"这个游戏只给「开/关」，所以最高倍率选什么都没区别 —— "
-                "它只会生成 1 帧（2X）。\n"
-                "想跑更高倍率需要游戏自己支持倍率选择。"
+                "该游戏的帧生成只有开/关，不请求额外倍率。\n"
+                "因此只生成 1 帧（2X），最高倍率写多少都是这个数。"
             )
         else:
             p.advice = (
-                "组件齐全说明游戏技术上支持，但能不能开还取决于游戏有没有"
-                "把这个开关放到画面上。\n"
-                "进去看画面设置里有没有「帧生成 / Frame Generation」这一项："
-                "有的话打开就行；没有的话就是游戏没开放，工具无法强行打开。\n"
+                "组件存在只说明游戏包含该通道；通道是否被调用取决于游戏自身的开关。\n"
+                "本工具不修改游戏的画面设置，无法代为打开该开关。\n"
                 + MULTIPLIER_NOTE
             )
         return p
@@ -335,9 +330,8 @@ def predict(
         p.headline = "这个游戏有 DLSS 超分，但没看到帧生成组件"
         p.reasons.append(f"同目录有 {', '.join(sr)}，但没有 {'/'.join(FG_COMPONENTS)}")
         p.advice = (
-            "游戏可能只有超分没有帧生成。\n"
-            "可以装上去试试 —— 有些游戏把帧生成插件放在别的目录，扫描不到。\n"
-            "判断标准：进游戏看画面设置里有没有「帧生成」这一项。"
+            "扫描范围是游戏主程序及其插件目录；组件放在其它位置时扫不到。\n"
+            "该通道是否可用，以游戏画面设置里有无「帧生成」一项为准。"
         )
         return p
 
@@ -346,8 +340,8 @@ def predict(
     p.headline = "没在游戏目录里找到 DLSS 相关组件"
     p.reasons.append("同目录既没有 nvngx_dlssg.dll 也没有 nvngx_dlss.dll")
     p.advice = (
-        "有些游戏把插件放在子目录或引擎目录里，所以没扫到不代表一定不行。\n"
-        "可以装上去碰碰运气；进游戏后看画面设置里有没有「帧生成」。"
+        "扫描范围是游戏主程序及其插件目录；组件放在其它位置时扫不到。\n"
+        "该通道是否可用，以游戏画面设置里有无「帧生成」一项为准。"
     )
     return p
 

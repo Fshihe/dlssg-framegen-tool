@@ -156,15 +156,16 @@ def other_engine_install(target_dir: str | Path, want_engine: str) -> dict | Non
 
 
 def conflict_message(record: dict, want_engine: str) -> str:
-    """给用户看的互斥说明。要能直接照着做。"""
+    """互斥说明：只陈述冲突事实与已安装内容。"""
     have = engine_of(record)
     return (
-        f"这个目录已经装了「{engine_label(have)}」，"
-        f"而你现在要装的是「{engine_label(want_engine)}」。\n\n"
-        "两者都会从代理 DLL 钩住游戏的渲染路径，同时存在会让游戏起不来"
-        "或者画面异常 —— 所以本工具不允许叠加安装。\n\n"
-        "请先卸载现有的引擎（本工具「卸载」页，或命令行 uninstall），再装新的。\n"
-        "卸载会把游戏目录还原成安装前的样子，不会留下残渣。"
+        f"该目录已安装「{engine_label(have)}」，当前要安装的是"
+        f"「{engine_label(want_engine)}」。\n\n"
+        "两个引擎都会通过代理 DLL 挂钩游戏的渲染路径，同时启用会导致游戏无法启动"
+        "或画面异常。\n\n"
+        "要改用另一个引擎，需先卸载当前引擎：本工具「卸载并还原」按钮，"
+        "或命令行 uninstall。\n"
+        "卸载会将游戏目录还原为安装前状态。"
     )
 
 

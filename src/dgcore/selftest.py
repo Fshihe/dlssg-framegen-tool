@@ -291,7 +291,7 @@ def run(verbose: bool = True) -> Runner:
         # 2c. 倍率上限（评论区明确要求的功能）
         # ------------------------------------------------------------------
         r.eq("倍率：4X 选项映射到 MaxGeneratedFrames=3",
-             installer.frame_option_to_value("4X（上限，推荐）"), 3)
+             installer.frame_option_to_value("4X（上限）"), 3)
         r.eq("倍率：3X 选项映射到 2", installer.frame_option_to_value("3X"), 2)
         r.eq("倍率：2X 选项映射到 1", installer.frame_option_to_value("2X"), 1)
         r.eq("倍率：未知文本回落到 3", installer.frame_option_to_value("乱写的"), 3)
@@ -344,21 +344,21 @@ def run(verbose: bool = True) -> Runner:
             cp5.headline,
         )
         r.check(
-            "预判：建议里说明选倍率上限没用",
-            "选什么都没区别" in cp5.advice or "2X" in cp5.advice,
+            "预判：说明里指出游戏不请求额外倍率",
+            "不请求额外倍率" in cp5.advice and "2X" in cp5.advice,
             cp5.advice,
         )
         cp6 = capability.predict("SomeGame-Win64-Shipping.exe", _capdir, "confirmed", True)
         r.check(
             "预判：其他游戏给出通用的倍率说明",
-            "上限" in cp6.advice and "由游戏决定" in cp6.advice,
+            "上限" in cp6.advice and "由游戏请求决定" in cp6.advice,
             cp6.advice,
         )
 
         # 组件存在 ≠ 游戏开放了功能（帕鲁反例），措辞必须留余地
         r.check(
             "预判：组件齐全时不会说死「一定能开」",
-            "装上就能开" not in cp6.headline and "看看" in cp6.advice or "有没有" in cp6.advice,
+            "装上就能开" not in cp6.headline and "取决于游戏自身的开关" in cp6.advice,
             f"{cp6.headline} / {cp6.advice[:80]}",
         )
 
@@ -1302,7 +1302,7 @@ def run(verbose: bool = True) -> Runner:
         co_up = oi.preflight(gCo, "optiscaler-xess", 4, running_names=[],
                              fg_input="upscaler", coexist=True)
         r.check("共存：输入源仍是 upscaler 时给出提醒",
-                any("建议把输入源改成 dlssg" in c.title for c in co_up),
+                any("upscaler 输入与 MV 分辨率检查冲突" in c.title for c in co_up),
                 str([c.title for c in co_up if c.level == "warn"]))
         # 两条记录必须同时留着 —— 否则第二个引擎装完，第一个就再也卸载不掉了
         st.record_install({

@@ -467,7 +467,7 @@ def cmd_install(args) -> int:
             out("存在阻断问题，已中止。请按上面的提示处理后重试。")
             return 2
         out("")
-        out("警告：你用 --force 跳过了上述阻断项，风险自负。")
+        out("警告：--force 已跳过上述阻断项。")
 
     plan = installer.make_plan(
         tdir, exe, proxy, router, game_name=root.name,
@@ -512,7 +512,7 @@ def cmd_install(args) -> int:
     _print_checks(vr.details)
     out("")
     out("现在启动游戏，在画面设置里把「帧生成 / Frame Generation」打开即可。")
-    out("如果游戏里没有出现该选项，请用日志级别 2 重装后再看游戏目录下的 dlssg_sm86\\logs。")
+    out("游戏内未出现该选项时，可用日志级别 2 重装，日志写入游戏目录 dlssg_sm86\\logs。")
     return 0 if vr.healthy else 4
 
 
@@ -653,7 +653,7 @@ def cmd_collect(args) -> int:
             L.append("")
             L.append("[Mod 日志] 没有 dlssg_sm86 目录")
             L.append("    → 可能原因：① 游戏没加载这个代理 DLL；② 日志级别是 1（只记错误）")
-            L.append("    → 建议：用 --log-level 2 重新安装后再进一次游戏")
+            L.append("    → 可复现方式：--log-level 2 重新安装后再运行一次游戏")
 
     out_file = reports_root() / f"诊断包-{_time.strftime('%Y%m%d-%H%M%S')}.txt"
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -680,7 +680,7 @@ def cmd_selftest(args) -> int:
     from .selftest import run
 
     _hdr("内置安全自检")
-    out("在临时目录里完整跑一遍安装/校验/卸载/回滚，不碰你的任何游戏。")
+    out("在临时目录中完整执行安装/校验/卸载/回滚，不触碰任何游戏目录。")
     out("")
     r = run(verbose=True)
     return 0 if r.failed == 0 else 1

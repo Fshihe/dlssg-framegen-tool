@@ -609,7 +609,7 @@ def find_exe_by_path(path: str | Path) -> tuple[Path | None, str]:
     if p.is_file():
         if p.suffix.lower() != ".exe":
             return None, f"不是 EXE 文件：{p}"
-        return p, "使用你指定的 EXE"
+        return p, "使用手动指定的 EXE"
     # 目录：自动找
     cands = find_render_exes(p)
     ok = [c for c in cands if c.eligible]

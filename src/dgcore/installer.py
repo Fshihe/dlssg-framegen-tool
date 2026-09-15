@@ -48,22 +48,22 @@ PROXY_ORDER = ["version.dll", "winmm.dll", "dinput8.dll", "winhttp.dll", "dxgi.d
 # 写多少效果都一样 —— 这是评论区里最容易误解的一点。
 FRAME_OPTIONS = [
     "6X（上限，仅 0.3.0）",
-    "4X（上限，推荐）",
+    "4X（上限）",
     "3X",
     "2X",
 ]
 FRAME_VALUE = {
     "6X（上限，仅 0.3.0）": 5,
     "5X（仅 0.3.0）": 4,
-    "4X（上限，推荐）": 3,
+    "4X（上限）": 3,
     "3X": 2,
     "2X": 1,
 }
 
 # 按 profile 过滤可选项（0.2.4 最高 4X，0.3.0 才到 6X）
 FRAME_VALUES_BY_MAX = {
-    4: ["4X（上限，推荐）", "3X", "2X"],
-    6: ["6X（上限，仅 0.3.0）", "5X（仅 0.3.0）", "4X（上限，推荐）", "3X", "2X"],
+    4: ["4X（上限）", "3X", "2X"],
+    6: ["6X（上限，仅 0.3.0）", "5X（仅 0.3.0）", "4X（上限）", "3X", "2X"],
 }
 
 
@@ -462,7 +462,7 @@ def preflight(
             "error",
             "版本与显卡不匹配",
             f"{prof.version} 不支持 RTX 20 系列（SM75）。\n"
-            "这属于程序内部错误，请反馈。",
+            "程序内部的 profile 选择出现不一致。",
         )
     else:
         pf.add("ok", f"使用上游 {prof.version}", prof.explanation)
@@ -480,7 +480,7 @@ def preflight(
         pf.add(
             "error",
             "没有写入权限",
-            f"{target_dir}\n{why}\n该目录可能位于 Program Files 等受保护位置，请用管理员身份重跑本工具。",
+            f"{target_dir}\n{why}\n该目录不可写；Program Files 等受保护位置需要管理员权限。",
         )
 
     # 3. 磁盘空间（留 200MB 余量）
@@ -488,7 +488,7 @@ def preflight(
         free = shutil.disk_usage(str(target_dir)).free
         need = 200 * 1024 * 1024
         if free < need:
-            pf.add("error", "磁盘空间不足", f"剩余 {free/1048576:.0f} MB，建议至少留 200 MB")
+            pf.add("error", "磁盘空间不足", f"剩余 {free/1048576:.0f} MB，本次需要 200 MB")
         else:
             pf.add("ok", "磁盘空间充足", f"剩余 {free/1073741824:.1f} GB")
     except Exception:
@@ -503,7 +503,7 @@ def preflight(
             "warn",
             "20 系是实验性支持",
             "上游从 0.3.0 起已移除 SM75 内核，本工具自动改用 0.2.4（最后一个支持 20 系的版本）。\n"
-            "可能出现画面闪烁、拖影或闪退，出问题可随时卸载还原。",
+            "实测可能出现画面闪烁、拖影或退出；卸载会还原安装前的文件。",
         )
     else:
         pf.add("error", "计算路由无法确定", f"检测到的 Router = {router!r}")
@@ -520,7 +520,7 @@ def preflight(
             else:
                 pf.add("error", "显卡不受支持", f"{g.name}：{g.reason}")
             if not g.driver:
-                pf.add("warn", "读不到驱动版本", "请确认已安装较新的 NVIDIA 官方驱动")
+                pf.add("warn", "读不到驱动版本", "未能从 NVIDIA 驱动读到版本号")
 
         # 硬件加速 GPU 计划：帧生成的硬性系统前置条件
         hags = getattr(env, "hags", None)
@@ -530,13 +530,13 @@ def preflight(
             pf.add(
                 "warn",
                 "硬件加速 GPU 计划（HAGS）已关闭",
-                "DLSS 帧生成硬性依赖这一项。不开启的话，即使 Mod 装好、"
+                "DLSS 帧生成硬性依赖这一项。关闭状态下即使 Mod 装好，"
                 "游戏也不会提供帧生成选项，并会提示「您的显卡不支持 DLSS 帧生成技术」。\n"
-                f"开启方法：{winenv.HAGS_GUI_PATH}（改完需重启电脑）\n"
-                "本工具的环境面板里有「一键开启」按钮。",
+                f"该项位于：{winenv.HAGS_GUI_PATH}（修改后需重启电脑）",
             )
         else:
-            pf.add("warn", "读不到硬件加速 GPU 计划状态", "如果游戏提示显卡不支持帧生成，请优先检查这一项")
+            pf.add("warn", "读不到硬件加速 GPU 计划状态",
+                   "该项是 DLSS 帧生成的前置条件；注册表读数不可用")
 
     # 5. 目标 EXE
     if exe_path is not None:
@@ -561,7 +561,7 @@ def preflight(
         pf.add(
             "error",
             "游戏/相关进程正在运行",
-            "请完全退出游戏后再安装：" + "、".join(hit),
+            "占用待写入文件的进程：" + "、".join(hit),
         )
     else:
         pf.add("ok", "游戏未在运行")
@@ -571,7 +571,7 @@ def preflight(
         pf.add(
             "error",
             "检测到反作弊组件",
-            f"{anticheat.summary}\n给带反作弊的游戏注入 DLL 可能导致封号，本工具默认阻止。",
+            f"{anticheat.summary}\n向带反作弊的游戏注入 DLL 存在封号风险，本工具默认阻止。",
         )
     elif anticheat is not None:
         pf.add("ok", "未检测到反作弊组件")
@@ -589,13 +589,14 @@ def preflight(
             pf.add(
                 "warn",
                 "目标文件名已被占用",
-                f"{dll_name} 已存在，可能来自其他 Mod。\n本工具会先把它备份到工具目录，再放入自己的文件，卸载时可完整还原。",
+                f"{dll_name} 已存在，来源不是本工具的安装记录。\n"
+                "该文件会先备份到工具目录再被覆盖，卸载时还原。",
             )
     else:
         pf.add("ok", "代理入口可用", dll_name)
 
     if ini.exists() and not ours:
-        pf.add("warn", "已存在 dlssg_sm86.ini", "会先备份再覆盖（可能是你手改过的配置）")
+        pf.add("warn", "已存在 dlssg_sm86.ini", "该文件会先备份到工具目录再被覆盖（当前内容不是本工具生成的）")
 
     # 8.5 引擎互斥：这个目录是不是已经装了 OptiScaler 引擎
     #      共存模式（coexist）下放行这一对：两者各用各的代理入口
@@ -606,11 +607,11 @@ def preflight(
         pf.add(
             "warn",
             "共存模式：本目录同时装有 OptiScaler 引擎",
-            "这是有意为之的组合：DLSSG 引擎负责把游戏自身的 DLSS 帧生成通道变成真的，"
-            "OptiScaler 再拿它当输入源，倍率由 OptiScaler 决定。\n\n"
-            "OptiScaler 那一侧的帧生成输入源必须是 dlssg —— 用 upscaler 的话，"
-            "UE 游戏会撞上「运动矢量与深度分辨率不一致」，倍率不起作用。\n\n"
-            "两者各自独立：卸载任意一个都不会动另一个的文件。",
+            "DLSSG 引擎替换 nvngx_dlssg.dll，使游戏自身的 DLSS 帧生成通道产出真实帧；"
+            "OptiScaler 以该通道为输入源，倍率由 OptiScaler 决定。\n\n"
+            "OptiScaler 一侧的帧生成输入源为 dlssg 时，UE 游戏不会触发"
+            "「运动矢量与深度分辨率不一致」；upscaler 输入会触发该冲突，倍率不生效。\n\n"
+            "两个引擎各自独立：卸载任意一个都不改动另一个的文件。",
         )
     elif _other:
         pf.add("error", "该目录已安装另一个引擎", state.conflict_message(_other, ENGINE_DLSSG))
@@ -624,10 +625,10 @@ def preflight(
                 pf.add(
                     "error",
                     "该目录已安装另一个引擎（按文件内容识别）",
-                    "这个目录里已经有本工具装的 OptiScaler 引擎文件，但没有对应的安装记录"
+                    "按内容识别到本工具装的 OptiScaler 引擎文件，但没有对应的安装记录"
                     "（状态文件可能被清理过）。\n\n"
-                    "请先执行一次「卸载」—— 本工具会按文件内容识别并清理干净 —— "
-                    "然后再安装 DLSSG 引擎。",
+                    "两个引擎都会从代理 DLL 钩住同一条渲染路径；"
+                    "「卸载」会按文件内容识别并清理这些文件。",
                 )
         except Exception:
             pass
@@ -638,9 +639,8 @@ def preflight(
         pf.add(
             "error",
             "检测到别的帧生成 Mod",
-            "这个目录里已经有第三方帧生成/超分 Mod，它们同样会钩住渲染路径，"
-            "与本工具叠加会互相打架：\n  · " + "\n  · ".join(_foreign)
-            + "\n\n请先用它们自带的卸载方式清理干净，再安装本工具。",
+            "这些第三方帧生成/超分 Mod 同样会钩住渲染路径，"
+            "与本工具叠加会互相冲突：\n  · " + "\n  · ".join(_foreign),
         )
     else:
         pf.add("ok", "未检测到其他帧生成 Mod")
@@ -662,7 +662,8 @@ def preflight(
         pf.add(
             "warn",
             "同目录还有其他代理 DLL",
-            "如果它们也是帧生成类代理，可能与本 Mod 冲突：" + "、".join(others),
+            "这些代理 DLL 位于同一目录：" + "、".join(others)
+            + "\n帧生成类代理会与本 Mod 冲突，它们同样会钩住渲染路径。",
         )
 
     return pf
@@ -1056,7 +1057,7 @@ def verify(target_dir: str | Path) -> VerifyResult:
         }
         out.append(
             Check("warn", "检测到本工具安装的文件，但没有安装记录",
-                  "可能状态文件被清理过。仍可正常卸载（会按内置哈希识别）。")
+                  "状态文件可能被清理过。卸载按内置哈希识别这些文件。")
         )
 
     healthy = True
@@ -1069,7 +1070,7 @@ def verify(target_dir: str | Path) -> VerifyResult:
         digest = try_hash(p)
         if not digest:
             out.append(Check("error", f"{f['name']} 无法读取",
-                             "文件可能正被游戏占用，请退出游戏后重新体检"))
+                             "文件可能正被游戏占用"))
             healthy = False
             continue
         exp = f.get("sha256") or ""
@@ -1107,7 +1108,7 @@ def verify(target_dir: str | Path) -> VerifyResult:
     # 运行状态提示：文件被占用时卸载会失败
     running = sorted(n for n in _running_candidates(target_dir, rec.get("exe", "")) if proc.is_running(n))
     if running:
-        out.append(Check("warn", "游戏正在运行", "请退出游戏后再卸载：" + "、".join(running)))
+        out.append(Check("warn", "游戏正在运行", "文件被占用的进程：" + "、".join(running)))
 
     return VerifyResult(True, healthy, out, rec)
 
@@ -1163,7 +1164,7 @@ def uninstall(target_dir: str | Path, force: bool = False) -> UninstallResult:
     if running and not force:
         res.message = (
             "游戏/相关进程正在运行，已中止卸载：" + "、".join(running)
-            + "。\n请完全退出游戏后重试 —— 运行中删除文件可能让游戏加载到残缺的代理 DLL。"
+            + "。\n运行中删除文件会让游戏加载到残缺的代理 DLL。"
         )
         return res
 
@@ -1178,7 +1179,7 @@ def uninstall(target_dir: str | Path, force: bool = False) -> UninstallResult:
             log(f"读取 {p} 失败，跳过删除", "warn")
             continue
         if exp and digest != exp and not force and name not in originals:
-            res.message += f"{name} 已被改动，为安全起见未删除；"
+            res.message += f"{name} 已被改动，未删除；"
             log(f"跳过删除 {p}：哈希与记录不符", "warn")
             continue
         if exp and digest != exp and name in originals:
@@ -1197,7 +1198,7 @@ def uninstall(target_dir: str | Path, force: bool = False) -> UninstallResult:
         res.success = False
         res.message += (
             f" 有 {len(remaining)} 个文件仍未能删除：{'、'.join(remaining)}。"
-            "通常是游戏正在运行占用了文件，请完全退出游戏后再次卸载。"
+            "这些文件通常被正在运行的进程占用。"
         )
         if not synthesized:
             # 记录保留，下次还能继续卸载

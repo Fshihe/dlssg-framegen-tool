@@ -73,7 +73,7 @@ TMP_SUFFIX = ".dlssgtool.tmp"
 # XeFGUnlock 代码路径，解锁后菜单档位由 MaxInterpolatedFrames 决定。
 # 5X/6X 因此标为实验性：写得进去，但能不能真的跑起来取决于 provider。
 MULTIPLIERS: tuple[tuple[int, str, bool], ...] = (
-    (2, "2X（最稳，不需要解锁）", False),
+    (2, "2X（不需要解锁）", False),
     (3, "3X", False),
     (4, "4X（包内默认）", False),
     (5, "5X（实验性）", True),
@@ -469,28 +469,28 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
     if mult > TEMPLATE_MAX_MULT:
         header.append(";")
         header.append(f"; 注意：{mult}X 超出了该构建自带模板写明的档位（最高 4X）。")
-        header.append("; 它是靠运行时给 provider 打补丁解锁的 —— 可能无效、可能画质")
-        header.append("; 异常、也可能崩溃。出问题就退回 2X/3X/4X。")
+        header.append("; 它是靠运行时给 provider 打补丁解锁的：可能无效、可能画质")
+        header.append("; 异常、也可能退出。")
     if key == "optiscaler-dlss5":
         header.append(";")
         if fg_enabled:
-            header.append("; 【本引擎自己的帧生成 + DLSS 5 NR：实测不可用】开了 NR 之后帧生成")
-            header.append("; 照常出帧（计数器会涨到一百多），但生成的帧进不了画面 —— 观感就是")
-            header.append("; 原生帧率。要帧生成请改用「XeSS 多帧生成」引擎包。")
+            header.append("; 【本引擎的帧生成 + DLSS 5 NR】开启 NR 之后帧生成照常出帧")
+            header.append("; （计数器会涨到一百多），但生成的帧进不了画面 —— 观感就是")
+            header.append("; 原生帧率。该组合实测不可用。")
         else:
-            header.append("; 【本引擎的帧生成已关闭】帧生成交给 DLSSG 引擎负责，本引擎只做")
-            header.append("; DLSS 5 神经网络渲染。这样全程只有一个帧生成器，不存在抢呈现。")
-            header.append("; 注意：这个组合还没有被验证过；测出问题请保留 OptiScaler.log。")
+            header.append("; 【本引擎的帧生成已关闭】帧生成由 DLSSG 引擎负责，本引擎只做")
+            header.append("; DLSS 5 神经网络渲染；全程只有一个帧生成器，不存在抢呈现。")
+            header.append("; 该组合尚未验证；OptiScaler.log 记录运行时输出。")
         header.append(";")
         header.append("; DLSS 5 神经网络渲染：实验性。所用 nvngx_dlssnr.dll 为未签名、")
-        header.append("; 且不在你当前驱动里的预览版组件，请自行判断是否使用。")
+        header.append("; 且不在当前驱动里的预览版组件。")
         header.append(";")
-        header.append("; [DlssNr] Enabled 已写成 false —— 本工具不替你打开它。")
-        header.append("; 想用就在游戏里按叠加层的快捷键开（那个键要先在叠加层里绑好）。")
+        header.append("; [DlssNr] Enabled 已写成 false。")
+        header.append("; 该通道在游戏内按叠加层快捷键开启（快捷键需先在叠加层里绑定）。")
         header.append(";")
-        header.append("; 注意这个坑：只要 NR 真的跑起来过，OptiScaler 会把这里回写成 true，")
-        header.append("; 而 true 会让**下一次启动的游戏直接退出**（实测：日志停在 Init done")
-        header.append("; 之后紧接着 DLL_PROCESS_DETACH）。下次启动前记得改回 false，")
+        header.append("; 注意：NR 运行过一次之后，OptiScaler 会把这里回写成 true，")
+        header.append("; 而 true 会让下一次启动的游戏直接退出（实测：日志停在 Init done")
+        header.append("; 之后紧接着 DLL_PROCESS_DETACH）。下次启动前该值需为 false，")
         header.append("; 或者重装一次本引擎包。")
     header.append("; " + "=" * 66)
     header.append("")
@@ -576,7 +576,7 @@ def pick_proxy(target_dir: Path, bundle_key: str, prev_proxy: str = "") -> tuple
         p = target_dir / name
         if not p.exists():
             if name.lower() == ship_name.lower():
-                return name, f"使用 OptiScaler 推荐入口 {name}"
+                return name, f"OptiScaler 期望的入口名 {name} 未被占用"
             return name, f"{ship_name} 已被占用，改用 {name}（内容相同，OptiScaler 按内容识别自己）"
         if is_our_file(p):
             return name, f"沿用本工具上次安装的入口 {name}"
@@ -1040,7 +1040,7 @@ def uninstall(target_dir: str | Path, record: dict, force: bool = False) -> Opti
     if running and not force:
         res.message = (
             "游戏/相关进程正在运行，已中止卸载：" + "、".join(running)
-            + "。\n请完全退出游戏后重试 —— 运行中删除文件可能让游戏加载到残缺的代理 DLL。"
+            + "。\n运行中删除文件会让游戏加载到残缺的代理 DLL。"
         )
         return res
 
@@ -1071,7 +1071,7 @@ def uninstall(target_dir: str | Path, record: dict, force: bool = False) -> Opti
                     res.message += f"{rel} 无法读取，未删除；"
                     continue
             else:
-                res.message += f"{rel} 已被改动，为安全起见未删除；"
+                res.message += f"{rel} 已被改动，未删除；"
                 continue
         try:
             p.unlink()
@@ -1083,7 +1083,7 @@ def uninstall(target_dir: str | Path, record: dict, force: bool = False) -> Opti
     if remaining:
         res.message += (
             f" 有 {len(remaining)} 个文件仍未能删除：{'、'.join(remaining[:6])}。"
-            "通常是游戏正在运行占用了文件，请完全退出游戏后再次卸载。"
+            "该文件通常被正在运行的进程占用。"
         )
         journal("opti_uninstall_incomplete", target_dir=str(target_dir), remaining=remaining)
         return res
@@ -1199,7 +1199,7 @@ def verify(target_dir: str | Path, record: dict) -> OptiVerify:
                         f"{info.get('bundle', '')}  倍率 {mult}X" if mult else info.get("bundle", "")))
         else:
             out.append(("warn", "OptiScaler.ini 不是本工具生成的",
-                        "可能被别的工具或你手动改过"))
+                        "该文件内容里没有本工具的署名"))
 
     names = {Path(record.get("exe", "")).name} if record.get("exe") else set()
     try:
@@ -1208,7 +1208,7 @@ def verify(target_dir: str | Path, record: dict) -> OptiVerify:
         pass
     running = sorted(n for n in names if n and proc.is_running(n))
     if running:
-        out.append(("warn", "游戏正在运行", "请退出游戏后再卸载：" + "、".join(running)))
+        out.append(("warn", "游戏正在运行", "文件被占用的进程：" + "、".join(running)))
 
     return OptiVerify(True, healthy, out)
 
@@ -1339,10 +1339,9 @@ def preflight(
 
     # 0) 稳定性总提醒 —— 放在最前面，因为它比其他任何一条都重要
     out.append(Check(
-        "warn", "本引擎可能导致游戏起不来",
-        "OptiScaler 会钩住 D3D12 与交换链，兼容性完全取决于具体游戏 ——\n"
-        "黑神话基准测试实测出现过「打开就闪退」。\n\n"
-        "出问题直接卸载即可还原，游戏文件本身不会被改动。",
+        "warn", "本引擎会钩住 D3D12 渲染路径与交换链",
+        "兼容性取决于具体游戏：黑神话基准测试实测出现过启动即退出。\n\n"
+        "卸载会删除本引擎写入的文件并还原安装前的原文件；游戏自身文件不在写入范围内。",
     ))
 
     # 1) 引擎互斥 —— 这条最要紧。
@@ -1360,11 +1359,11 @@ def preflight(
     if other and coexist and engine_of(other) == ENGINE_DLSSG:
         out.append(Check(
             "warn", "共存模式：本目录同时装了 DLSSG 引擎",
-            "这是有意为之的组合。DLSSG 引擎负责把游戏自身的 DLSS 帧生成通道变成"
-            "真的，OptiScaler 再拿它当输入源，倍率由 OptiScaler 决定。\n\n"
-            "配套要求：**帧生成输入源必须是 dlssg**。用 upscaler 的话，UE 游戏会撞上"
-            "「运动矢量与深度分辨率不一致」，XeFG 每帧失败、倍率不起作用。\n\n"
-            "两者各自独立：卸载任意一个都不会动另一个的文件。",
+            "DLSSG 引擎替换 nvngx_dlssg.dll，使游戏自身的 DLSS 帧生成通道产出真实帧；"
+            "OptiScaler 以该通道为输入源，倍率由 OptiScaler 决定。\n\n"
+            "dlssg 输入需要游戏产出 DLSS 帧生成流。用 upscaler 输入时，UE 游戏会持续报"
+            "「运动矢量与深度分辨率不一致」，XeFG 每帧失败、倍率不生效。\n\n"
+            "两个引擎各自独立：卸载任意一个都不改动另一个的文件。",
         ))
     elif other:
         out.append(Check("error", "该目录已安装另一个引擎",
@@ -1392,30 +1391,27 @@ def preflight(
 
         if dlssg_engine_here:
             out.append(Check(
-                "warn", "FGInput=dlssg：提供方在位，但要在游戏里打开帧生成",
-                "本目录装了 DLSSG 引擎 —— 它会把游戏自身的 DLSS 帧生成通道换成真的"
-                "（替换 nvngx_dlssg.dll），所以 dlssg 输入有数据可取。\n\n"
-                "但那条通道只在游戏里开启「帧生成」之后才会被调用。"
-                "请进画面设置确认帧生成是开着的 —— DLSSG 引擎会让这个开关变得可用。",
+                "warn", "dlssg 输入由本目录的 DLSSG 引擎提供",
+                "本目录装了 DLSSG 引擎，它会替换 nvngx_dlssg.dll，"
+                "游戏自身的 DLSS 帧生成通道因此产出真实帧，dlssg 输入有数据可取。\n\n"
+                "该通道只在游戏内开启「帧生成」后被调用；DLSSG 引擎会使该开关可用。",
             ))
         elif has_fg:
             out.append(Check(
-                "warn", "FGInput=dlssg：必须先在游戏里打开「帧生成」",
-                "这个输入源取的是游戏自身 DLSSG（Streamline）通道的数据。\n"
-                "如果画面设置里没有开启帧生成，那条通道就不会被调用，\n"
-                f"OptiScaler 会停在无效状态（已找到：{why}）。\n\n"
-                "实测这个无效状态会让游戏闪退。请先在游戏里打开帧生成再装。",
+                "warn", "dlssg 输入需要游戏产出 DLSS 帧生成流",
+                f"该输入取自游戏自身的 DLSSG（Streamline）通道；未开启帧生成时该通道不会被调用。\n"
+                f"检测到 DLSSG 组件：{why}\n"
+                "此状态下 OptiScaler 不产出帧；实测会出现游戏退出。",
             ))
         else:
             out.append(Check(
-                "error", "FGInput=dlssg 风险过高：没有找到提供方",
-                "既没有在本目录装 DLSSG 引擎，也没在游戏主程序附近找到 "
+                "error", "dlssg 输入的提供方缺失",
+                "本目录没有装 DLSSG 引擎，游戏主程序附近也没有找到 "
                 "nvngx_dlssg.dll / sl.dlss_g.dll。\n"
-                "组件也可能装在别的子目录（比如 UE 的 Plugins），本工具只扫了"
-                "主程序附近，所以这不等于游戏一定没有。\n\n"
-                "把输入源指向一个可能不存在的通道，实测会让游戏直接闪退。\n"
-                "两种情况二选一：**改用 FGInput=upscaler**，"
-                "或者先装 DLSSG 引擎并勾上「共存模式」。",
+                "组件也可能装在别的子目录（比如 UE 的 Plugins），本工具只扫了主程序附近，"
+                "扫描结果不等于游戏一定没有。\n\n"
+                "该输入指向的通道可能不存在；实测会让游戏直接退出。\n"
+                "可用的替代取值为 FGInput=upscaler。",
             ))
 
     # 1.6) 输入源与共存模式的搭配建议。
@@ -1423,27 +1419,26 @@ def preflight(
     if not fg_enabled:
         out.append(Check(
             "ok", "本引擎的帧生成已关闭：只做神经网络渲染",
-            "帧生成交给 DLSSG 引擎负责 —— 这样全程只有一个帧生成器，"
-            "不存在两个帧生成器抢呈现的问题。\n\n"
-            "记得进游戏把帧生成打开、并用叠加层快捷键开 DLSS 5 神经网络渲染。",
+            "帧生成由 DLSSG 引擎负责，全程只有一个帧生成器，不存在两个帧生成器抢呈现。\n\n"
+            "[FrameGen] Enabled=false、[XeFG] ForceBorderless=false 会写入生成的 INI。",
         ))
     elif coexist and (fg_input or "").lower() != "dlssg":
         out.append(Check(
-            "warn", "共存模式下建议把输入源改成 dlssg",
-            "既然本目录已经装了 DLSSG 引擎，游戏自身的 DLSS 帧生成通道就是可用的 ——\n"
-            "用 dlssg 当输入源能绕开「运动矢量与深度分辨率不一致」那个坑。\n\n"
-            "upscaler 输入只适合「游戏没有帧生成、只有超分」的场合。",
+            "warn", "共存模式下 upscaler 输入与 MV 分辨率检查冲突",
+            "本目录已装 DLSSG 引擎，游戏自身的 DLSS 帧生成通道可用。\n"
+            "upscaler 输入在 UE 游戏里会持续报「运动矢量与深度分辨率不一致」，"
+            "XeFG 每帧失败、倍率不生效；dlssg 输入不受该问题影响。\n\n"
+            "当前输入源：upscaler。",
         ))
     if (fg_enabled and (fg_input or "").lower() == "dlssg"
             and not (other and engine_of(other) == ENGINE_DLSSG)):
         out.append(Check(
-            "warn", "dlssg 输入源可能没有提供方",
-            "dlssg 输入取的是游戏自身 DLSSG（Streamline）通道的数据。\n"
-            "RTX 20/30 上那条通道默认是被拒的（Streamline 会说 "
-            "not supported on current hardware），需要先装**本工具的 DLSSG 引擎**"
-            "把它换掉；或者游戏本身在你这张卡上就支持 DLSS 帧生成。\n\n"
-            "提供方不存在时，OptiScaler 会停在无效状态（实测会让游戏闪退）。\n"
-            "想省事就同时勾上「共存模式」，并先装一次 DLSSG 引擎。",
+            "warn", "dlssg 输入在 RTX 20/30 上默认没有提供方",
+            "dlssg 输入取自游戏自身 DLSSG（Streamline）通道的数据。\n"
+            "RTX 20/30 上那条通道默认被拒（Streamline 报 "
+            "not supported on current hardware），需要本工具的 DLSSG 引擎替换它；"
+            "或者游戏本身在这张卡上就支持 DLSS 帧生成。\n\n"
+            "提供方不存在时 OptiScaler 停在无效状态，实测会让游戏退出。",
         ))
 
     # 2) 外来 Mod
@@ -1453,9 +1448,8 @@ def preflight(
     if foreign:
         out.append(Check(
             "error", "检测到别的帧生成 Mod",
-            "这些文件同样会钩住渲染路径，与本引擎叠加会互相打架：\n  · "
-            + "\n  · ".join(foreign)
-            + "\n\n请先用它们自带的卸载方式清理干净再装。",
+            "这些文件同样会钩住渲染路径，与本引擎叠加会互相冲突：\n  · "
+            + "\n  · ".join(foreign),
         ))
     else:
         out.append(Check("ok", "未检测到其他帧生成 Mod"))
@@ -1474,7 +1468,7 @@ def preflight(
         out.append(Check(
             "error", "没有写入权限",
             f"{target_dir}\n{type(exc).__name__}: {exc}\n"
-            "该目录可能位于 Program Files 等受保护位置，请用管理员身份重跑本工具。",
+            "该目录不可写；Program Files 等受保护位置需要管理员权限。",
         ))
 
     # 4) 磁盘空间（bundle 体积 + 200MB 余量）
@@ -1498,7 +1492,7 @@ def preflight(
     hit = sorted(n for n in names if n and proc.is_running(n))
     if hit:
         out.append(Check("error", "游戏/相关进程正在运行",
-                         "请完全退出游戏后再安装：" + "、".join(hit)))
+                         "占用待写入文件的进程：" + "、".join(hit)))
     else:
         out.append(Check("ok", "游戏未在运行"))
 
@@ -1506,7 +1500,7 @@ def preflight(
     if anticheat is not None and getattr(anticheat, "risky", False):
         out.append(Check(
             "error", "检测到反作弊组件",
-            f"{anticheat.summary}\n给带反作弊的游戏注入 DLL 可能导致封号，本工具默认阻止。",
+            f"{anticheat.summary}\n向带反作弊的游戏注入 DLL 存在封号风险，本工具默认阻止。",
         ))
     elif anticheat is not None:
         out.append(Check("ok", "未检测到反作弊组件"))
@@ -1520,12 +1514,10 @@ def preflight(
         if kind == "internal":
             out.append(Check(
                 "warn", f"游戏当前用的是 {raw}，不是 DLSS/FSR/XeSS",
-                "FGInput=upscaler 的含义是「拿超分器的输入来插帧」，"
-                "所以超分器必须真的在运行。\n"
-                "TSR/TAA 是虚幻引擎内部实现，OptiScaler 钩不到 —— "
-                "这种情况下 XeFG 不会激活，界面上只表现为「没效果」。\n\n"
-                "请在游戏的画面设置里把抗锯齿/超分改成 **DLSS**（或 FSR / XeSS），"
-                "重启游戏后再看。",
+                "FGInput=upscaler 从超分器的输出取输入，因此要求超分器产出帧。\n"
+                "TSR/TAA 是虚幻引擎内部实现，OptiScaler 钩不到它的输入 —— "
+                "该状态下 XeFG 不会激活，界面上只表现为「没效果」。\n\n"
+                f"当前超分取值：{raw}",
             ))
         elif kind == "external":
             out.append(Check("ok", f"游戏超分设置可用（{raw}）",
@@ -1533,8 +1525,9 @@ def preflight(
         else:
             out.append(Check(
                 "warn", "读不到游戏的超分设置",
-                "进游戏后在画面设置里确认抗锯齿/超分选的是 DLSS（或 FSR / XeSS）"
-                "而不是 TSR，否则 FGInput=upscaler 拿不到输入。",
+                "FGInput=upscaler 需要抗锯齿/超分为 DLSS、FSR 或 XeSS 时才取得到输入；"
+                "TSR 下 OptiScaler 拿不到输入。\n"
+                "该取值未在游戏配置里找到。",
             ))
 
     # 10) payload 完整性
@@ -1554,8 +1547,8 @@ def preflight(
             "error", "引擎包里缺帧生成所需的 provider",
             f"本包要输出 {FG_OUTPUT}，但下列文件不在 bundle 里：\n  · "
             + "\n  · ".join(lack)
-            + "\n\n缺 provider 时 OptiScaler 会停在无效状态，实测会让游戏闪退。\n"
-            "请用 tools/fetch_optiscaler.py 重新提取引擎包（不要手改 payload）。",
+            + "\n\n缺 provider 时 OptiScaler 停在无效状态，实测会让游戏退出。\n"
+            "引擎包由 tools/fetch_optiscaler.py 提取，payload 不在手工修改范围内。",
         ))
     else:
         out.append(Check("ok", "帧生成 provider 齐全"))
@@ -1577,9 +1570,9 @@ def preflight(
         out.append(Check(
             "warn", "没找到游戏的 Engine.ini",
             how + "\n\n"
-            "虚幻引擎游戏需要在这里关闭 dilated motion vectors，否则 XeFG 会每帧失败"
+            "虚幻引擎游戏需要在该文件里关闭 dilated motion vectors，否则 XeFG 每帧失败"
             "（表现为菜单显示 4X 但帧数没变）。\n"
-            "非虚幻引擎游戏可以忽略这条。",
+            "非虚幻引擎游戏不涉及此项。",
         ))
     elif path.is_file() and ueconfig.has_cvar(ueconfig.read_text(path)):
         out.append(Check("ok", "游戏配置已就绪", f"dilated motion vectors 已关闭（{path}）"))
@@ -1588,20 +1581,20 @@ def preflight(
             "ok", "将修改游戏配置（可完整还原）",
             f"{how}\n"
             f"会加入一行 {ueconfig.CVAR_KEY}={ueconfig.CVAR_VALUE}（[SystemSettings] 节），"
-            "这是 XeFG 正常工作的前提。\n"
+            "XeFG 正常工作依赖这一行。\n"
             "卸载时会精确撤销这一行，要么删掉要么改回原值，逐字节还原。",
         ))
 
     if bundle == "optiscaler-dlss5":
         out.append(Check(
-            "warn", "DLSS 5 神经网络渲染：实验性，而且目前无法与帧生成同时使用",
-            "实测（黑神话 / 帕鲁，RTX 3070）：开了 NR 之后帧生成照常出帧 —— 日志里 "
-            "Interpolation count 在变、计数器会涨到一百多 —— 但**生成的帧进不了画面**，"
-            "肉眼观感就是原生帧率。\n\n"
-            "所以要帧生成就用「XeSS 多帧生成」那个引擎包；这个包只当神经网络渲染试用。\n\n"
-            "另外两点：所用 nvngx_dlssnr.dll 是未签名、且不在你当前驱动里的预览版组件"
-            "（本工具只是原样装进游戏目录，不做任何修改）；它必须在游戏内用叠加层快捷键"
-            "开启，写进 ini 会被回写、下次启动游戏可能起不来。",
+            "warn", "DLSS 5 神经网络渲染无法与帧生成同时生效",
+            "实测（黑神话 / 帕鲁，RTX 3070）：开启 NR 后帧生成照常出帧 —— 日志里 "
+            "Interpolation count 在变、计数器会涨到一百多 —— 但生成的帧进不了画面，"
+            "观感为原生帧率。\n\n"
+            "本包所用 nvngx_dlssnr.dll 是未签名、且不在当前驱动里的预览版组件"
+            "（本工具只原样写入游戏目录，不做修改）。\n"
+            "该通道取值为游戏内叠加层快捷键控制；写入 ini 会被引擎回写，"
+            "回写后下一次启动游戏会退出。",
         ))
 
     return out

@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import os
 import queue
+import re
 import sys
 import threading
 import tkinter as tk
@@ -44,19 +45,17 @@ C_BG_ERR = "#fdecea"
 # 这三段文本同时也是 _engine_map 的键。
 ENGINE_CHOICE_DLSSG = "DLSSG（NVIDIA DLSS 帧生成）"
 ENGINE_CHOICE_XESS = "OptiScaler · XeSS 多帧生成"
-ENGINE_CHOICE_DLSS5 = "OptiScaler · DLSS 5 神经网络渲染 + XeSS"
+ENGINE_CHOICE_DLSS5 = "OptiScaler · DLSS 5 神经网络渲染"
 
-# 选中 DLSS 5 包时摆在界面上的那段说明。只写实测到的事实和后果。
+# 选中 DLSS 5 引擎时摆出来的警告。只写已确认的后果，不写建议。
 DLSS5_WARNING = (
-    "严重警告：可能失效，也可能让游戏崩溃、闪退。\n"
+    "已确认的后果：\n"
+    "· 无法与帧生成同时使用 —— 开启后帧生成仍会产出帧，但产出的帧不进入画面。\n"
+    "· 所用 nvngx_dlssnr.dll 未签名，且不在当前驱动中（本工具原样写入，不做修改）。\n"
+    "· 只能在游戏内通过叠加层快捷键启用；写入 ini 后该值会被回写为 true，"
+    "而 true 会导致下一次启动的游戏退出。\n"
     "\n"
-    "· 目前无法与帧生成同时使用 —— 实测开了它之后，帧生成虽然照常出帧"
-    "（计数器会涨），但生成的帧进不了画面，观感就是原生帧率。\n"
-    "· 所用模型是未签名的预览版组件，且不在你当前驱动里。\n"
-    "· 必须在游戏内用叠加层快捷键开启（写进 ini 会被回写，"
-    "而那个值会让下一次启动的游戏直接退出）。\n"
-    "\n"
-    "只在你清楚这些后果、并且愿意自己承担的时候再勾。出问题直接卸载即可还原。"
+    "卸载可完整还原。"
 )
 
 
@@ -101,8 +100,8 @@ class App(tk.Tk):
         self.anticheat = ac.AntiCheatReport([], [])
 
         self.proxy_var = tk.StringVar(value="自动选择")
-        self.sample_var = tk.StringVar(value="精确档（推荐，HardwareBilinear=0）")
-        self.loglv_var = tk.StringVar(value="仅记录错误（Level=1）")
+        self.sample_var = tk.StringVar(value="精确档（HardwareBilinear=0）")
+        self.loglv_var = tk.StringVar(value="仅错误（Level=1）")
         self.frames_var = tk.StringVar(value=installer.FRAME_OPTIONS[0])
         self.preset_var = tk.StringVar(value="标准")
         self.filter_var = tk.BooleanVar(value=True)
@@ -175,7 +174,7 @@ class App(tk.Tk):
         tab_game.rowconfigure(1, weight=1)
 
         # ---------------- ① 环境 ----------------
-        env_box = ttk.LabelFrame(tab_env, text=" 你的电脑环境 ", padding=10)
+        env_box = ttk.LabelFrame(tab_env, text=" 系统与显卡环境 ", padding=10)
         env_box.grid(row=0, column=0, sticky="ew")
         env_box.columnconfigure(0, weight=1)
 
@@ -209,8 +208,7 @@ class App(tk.Tk):
 
         ttk.Label(
             tab_env,
-            text="硬件加速 GPU 计划（HAGS）是帧生成的硬性前置条件，状态就在上面那段里。\n"
-                 "这一页没问题之后，去「游戏与安装」页挑游戏。",
+            text="硬件加速 GPU 计划（HAGS）是帧生成的前置条件，状态见上方。",
             font=FONT, foreground=C_DIM, justify="left",
         ).grid(row=1, column=0, sticky="w", pady=(10, 0))
 
@@ -225,7 +223,8 @@ class App(tk.Tk):
         ttk.Label(setup, text="帧生成引擎：", font=FONT).grid(row=0, column=0, sticky="w")
         self.engine_combo = ttk.Combobox(
             setup, textvariable=self.engine_var, font=FONT, state="readonly",
-            # DLSS 5 那个包不在下拉框里 —— 它是彩蛋，单独放在下面的「实验性」区块
+            # 下拉框只列两个主引擎。DLSS 5 是实验性的第三个引擎，放在「高级」页
+            # （见 _build_advanced 里的 dlss5_check）—— 不放在这里，避免误选。
             values=[ENGINE_CHOICE_DLSSG, ENGINE_CHOICE_XESS],
         )
         self.engine_combo.grid(row=0, column=1, columnspan=3, sticky="ew")
@@ -233,37 +232,6 @@ class App(tk.Tk):
 
         self.engine_hint = ttk.Label(setup, text="", font=FONT, foreground=C_DIM, justify="left")
         self.engine_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
-
-        # DLSS 5 单独框起来：它和 XeSS 多帧生成不是一回事（现在跟帧生成冲突），
-        # 混在下拉框里容易被顺手选中，然后觉得「装了没用」。
-        self.dlss5_box = ttk.LabelFrame(
-            setup, text=" 实验性（有已知问题，想折腾再看） ", padding=(8, 6)
-        )
-        self.dlss5_box.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        self.dlss5_box.columnconfigure(0, weight=1)
-        self.dlss5_var = tk.BooleanVar(value=False)
-        self.dlss5_check = ttk.Checkbutton(
-            self.dlss5_box,
-            text="改用 OptiScaler · DLSS 5 神经网络渲染（替代上面的 XeSS 多帧生成）",
-            variable=self.dlss5_var, command=self._on_dlss5_toggle,
-        )
-        self.dlss5_check.grid(row=0, column=0, sticky="w")
-
-        # 这段警告只在真选中这个包时出现，平时收起来，不占地方也不吓人
-        self.dlss5_warn = ttk.Frame(self.dlss5_box)
-        self.dlss5_warn.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        self.dlss5_warn.columnconfigure(0, weight=1)
-        ttk.Label(
-            self.dlss5_warn, text="实验性：DLSS 5 神经网络渲染",
-            font=FONT_B, foreground=C_WARN,
-        ).grid(row=0, column=0, sticky="w")
-        self.dlss5_note = ttk.Label(
-            self.dlss5_warn, text=DLSS5_WARNING, font=FONT, foreground=C_WARN,
-            justify="left", wraplength=700,
-        )
-        self.dlss5_note.grid(row=1, column=0, sticky="ew", pady=(2, 0))
-        self.dlss5_warn.bind("<Configure>", self._on_wrap)
-        self.dlss5_warn.grid_remove()
 
         # 倍率上限：这是评论区明确要求加的功能（0.3.0 最高 6X）
         ttk.Label(setup, text="最高倍率：", font=FONT).grid(row=3, column=0, sticky="w", pady=(6, 0))
@@ -345,7 +313,7 @@ class App(tk.Tk):
 
         # ---------------- ③ 高级 ----------------
         # 平时不用动的旋钮全在这页，主流程那页就不会被淹掉。
-        opt = ttk.LabelFrame(tab_adv, text=" 高级选项（默认值适合绝大多数人，不用改） ", padding=10)
+        opt = ttk.LabelFrame(tab_adv, text=" 高级选项 ", padding=10)
         opt.grid(row=0, column=0, sticky="ew")
         for col in (1, 3):
             opt.columnconfigure(col, weight=1)
@@ -368,14 +336,14 @@ class App(tk.Tk):
         ttk.Label(opt, text="采样档：", font=FONT).grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.sample_combo = ttk.Combobox(
             opt, textvariable=self.sample_var, font=FONT, state="readonly",
-            values=["精确档（推荐，HardwareBilinear=0）", "性能档（近似采样，HardwareBilinear=1，仅 SM86）"],
+            values=["精确档（HardwareBilinear=0）", "性能档（HardwareBilinear=1，仅 SM86）"],
         )
         self.sample_combo.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
 
         ttk.Label(opt, text="日志级别：", font=FONT).grid(row=1, column=2, sticky="w", pady=(6, 0))
         ttk.Combobox(
             opt, textvariable=self.loglv_var, font=FONT, state="readonly",
-            values=["仅记录错误（Level=1）", "关闭日志（Level=0）", "运行诊断（Level=2）", "详细日志（Level=3）"],
+            values=["关闭（Level=0）", "仅错误（Level=1）", "信息（Level=2）", "调试（Level=3）", "全部（Level=4）"],
         ).grid(row=1, column=3, sticky="ew", pady=(6, 0))
 
         ttk.Label(opt, text="扫描档位：", font=FONT).grid(row=2, column=0, sticky="w", pady=(6, 0))
@@ -395,35 +363,59 @@ class App(tk.Tk):
         # 游戏不设它的话，XeFG 每帧都因 MV/深度分辨率不匹配而失败（表现为"没效果"）。
         self.hiresmv_var = tk.BooleanVar(value=False)
         self.hiresmv_check = ttk.Checkbutton(
-            opt, text="运动矢量按高分辨率处理（HighResMV，默认不改；画面异常时可试）",
+            opt, text="运动矢量按高分辨率处理（HighResMV）",
             variable=self.hiresmv_var,
         )
         self.hiresmv_check.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
-        # 共存模式：允许 DLSSG 引擎与 OptiScaler 引擎装在同一个目录。
-        # 两者各用各的代理入口（DLSSG 用 version.dll、OptiScaler 用 dxgi.dll），
-        # 实测能同进程共存（帕鲁 2 分半、黑神话 3 分钟）。
-        # 这个组合解决的是一个真问题：UE 游戏里 FGInput=upscaler 会撞上
-        # 「运动矢量与深度分辨率不一致」（帕鲁 5572 次报错、倍率不起作用）；
-        # DLSSG 引擎把游戏自身的 DLSS 帧生成通道变成真的之后，OptiScaler 改用
-        # dlssg 输入就没这个问题（同机同配置 0 报错）。倍率仍由本引擎决定。
+        # 共存模式：DLSSG 引擎与 OptiScaler 引擎装入同一目录，此时 OptiScaler
+        # 的帧生成输入改为 dlssg（取游戏自身的 DLSS 帧生成流）。
+        # 两者各用各的代理入口：DLSSG 用 version.dll、OptiScaler 用 dxgi.dll。
         self.coexist_var = tk.BooleanVar(value=False)
         self.coexist_check = ttk.Checkbutton(
-            opt, text="与 DLSSG 引擎共存（帧生成改走 DLSS 流输入，倍率仍由本引擎决定）",
+            opt, text="与 DLSSG 引擎共存（输入改为 DLSS 流，倍率由本引擎决定）",
             variable=self.coexist_var,
         )
         self.coexist_check.grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
-        # 只留神经网络渲染、关掉本引擎的帧生成。
-        # 用途：帧生成交给 DLSSG 引擎（帕鲁上唯一被验证"生成的帧真的进了画面"的
-        # 那个），OptiScaler 只做 DLSS 5 NR。两个帧生成器同时工作时会抢呈现 ——
-        # 实测 OptiScaler 算出来的帧进不了画面（计数器在涨、观感是原生帧率）。
+        # 关闭 OptiScaler 自身的帧生成，只保留神经网络渲染等其它通道。
+        # 与上一条的区别：上一条让本引擎继续产出帧，这一条不产出帧。
         self.nofg_var = tk.BooleanVar(value=False)
         self.nofg_check = ttk.Checkbutton(
-            opt, text="关掉本引擎的帧生成，只做神经网络渲染（帧生成交给 DLSSG 引擎）",
+            opt, text="关闭本引擎的帧生成（只保留神经网络渲染等其它通道）",
             variable=self.nofg_var,
         )
         self.nofg_check.grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        # ---------------- 实验性引擎：DLSS 5 神经网络渲染 ----------------
+        # 放在「高级」页而不是「游戏与安装」页：它是第三个引擎（OptiScaler 的
+        # DLSS 5 构建），和 XeSS 多帧生成不是一回事，选中后直接替换引擎包。
+        # 主流程那页只留两个成熟引擎，避免误选。
+        self.dlss5_box = ttk.LabelFrame(
+            tab_adv, text=" 实验性引擎 ", padding=10
+        )
+        self.dlss5_box.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.dlss5_box.columnconfigure(0, weight=1)
+
+        self.dlss5_var = tk.BooleanVar(value=False)
+        self.dlss5_check = ttk.Checkbutton(
+            self.dlss5_box,
+            text="DLSS 5 神经网络渲染（OptiScaler · 替换 XeSS 多帧生成）",
+            variable=self.dlss5_var, command=self._on_dlss5_toggle,
+        )
+        self.dlss5_check.grid(row=0, column=0, sticky="w")
+
+        # 警告块：选中这个引擎才展开
+        self.dlss5_warn = ttk.Frame(self.dlss5_box)
+        self.dlss5_warn.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.dlss5_warn.columnconfigure(0, weight=1)
+        self.dlss5_note = ttk.Label(
+            self.dlss5_warn, text=DLSS5_WARNING, font=FONT, foreground=C_WARN,
+            justify="left", wraplength=700,
+        )
+        self.dlss5_note.grid(row=0, column=0, sticky="ew")
+        self.dlss5_warn.bind("<Configure>", self._on_wrap)
+        self.dlss5_warn.grid_remove()
 
         # ---------------- 操作按钮（属于「游戏与安装」页） ----------------
         act = ttk.Frame(tab_game)
@@ -574,7 +566,7 @@ class App(tk.Tk):
             )
         elif g.verdict == VERDICT_OK:
             bg, fg = C_BG_OK, C_OK
-            title = f"✓ 你的显卡可以用：{g.name}"
+            title = f"✓ 显卡可用：{g.name}"
             detail = (
                 f"架构 {g.family}　驱动 {g.driver or '未知'}　显存 {g.vram_mib} MiB\n"
                 f"计算路由将使用 Router={g.router}，KernelImage=PTX"
@@ -591,7 +583,7 @@ class App(tk.Tk):
             detail = (
                 f"{g.family or '未知架构'}　驱动 {g.driver or '未知'}\n{g.reason}\n"
                 "已经自动切到 XeSS 引擎 —— XeSS 不依赖本 Mod 的 NVIDIA 内核，"
-                "可以试。实际效果请自己进游戏确认。"
+                "该引擎不依赖本 Mod 的 NVIDIA 内核。"
             )
         else:
             bg, fg = C_BG_ERR, C_ERR
@@ -724,10 +716,13 @@ class App(tk.Tk):
         self._apply_filter()
 
     def _on_dlss5_toggle(self) -> None:
-        """「实验性」勾选框：勾上就换成 DLSS 5 包，取消就退回 XeSS 包。
+        """实验性引擎勾选框：勾上换成 DLSS 5 引擎包，取消退回 XeSS 包。
 
         它和下拉框改的是同一个 engine_var，所以两边不会各说各话。
         """
+        # 用户显式选过了 —— 环境检测晚一步回来时不许再覆盖他的选择。
+        # 漏了这一句的话，勾选 DLSS 5 之后会被异步完成的自动选引擎改回 DLSSG。
+        self._engine_autoset = True
         if bool(self.dlss5_var.get()):
             if self.engine_var.get() != ENGINE_CHOICE_DLSS5:
                 self.engine_var.set(ENGINE_CHOICE_DLSS5)
@@ -825,20 +820,18 @@ class App(tk.Tk):
                 self.dlss5_warn.grid_remove()
         except tk.TclError:
             pass
-        # 高级页那几个旋钮只作用于 DLSSG 引擎，切到 OptiScaler 时说明一句，
-        # 免得看见一片置灰以为界面坏了
+        # 高级页最上面那几项只作用于 DLSSG 引擎，另一种引擎下置灰并标注原因
         try:
             self.advanced_hint.configure(
-                text=("当前是 OptiScaler 引擎：计算路由、代理入口、采样档、日志级别都是 "
-                      "DLSSG 引擎的概念，这一页的这几项用不上（已置灰）。"
+                text=("计算路由、代理入口、采样档、日志级别仅作用于 DLSSG 引擎"
+                      "（当前引擎为 OptiScaler，这几项已置灰）。"
                       if is_opti else
-                      "计算路由、代理入口、采样档、日志级别只作用于 DLSSG 引擎；"
-                      "「最高倍率」在「游戏与安装」页。")
+                      "计算路由、代理入口、采样档、日志级别仅作用于 DLSSG 引擎。")
             )
         except tk.TclError:
             pass
 
-        # 引擎说明
+        # 引擎说明：只陈述该引擎写入什么、由谁决定倍率
         if is_opti:
             spec = optiscaler.get_bundle(bundle)
             ok, msg = optiscaler.bundle_available(bundle)
@@ -848,19 +841,17 @@ class App(tk.Tk):
                 self.engine_hint.configure(text=f"引擎包不完整：{msg}", foreground=C_ERR)
             elif bundle == "optiscaler-dlss5":
                 self.engine_hint.configure(
-                    text="已选中实验性引擎包：DLSS 5 神经网络渲染（详细情况见上面那段说明）。"
-                         "倍率由本工具直接设定。",
+                    text="实验性引擎：DLSS 5 神经网络渲染。警告见「高级」页。",
                     foreground=C_WARN,
                 )
             else:
                 self.engine_hint.configure(
-                    text=f"{spec.display_name}。倍率由本工具直接下发给 XeSS 帧生成，"
-                         "不再依赖游戏提供的选项。",
+                    text=f"{spec.display_name}　倍率由本工具设定，不依赖游戏提供的选项。",
                     foreground=C_DIM,
                 )
         else:
             self.engine_hint.configure(
-                text="DLSSG（NVIDIA DLSS 帧生成）：本工具的原有引擎，按显卡路由选上游版本。",
+                text="DLSSG：NVIDIA DLSS 帧生成。按显卡路由选择上游版本。",
                 foreground=C_DIM,
             )
 
@@ -879,8 +870,8 @@ class App(tk.Tk):
         if engine == state.ENGINE_OPTISCALER:
             mult = self._current_multiplier()
             lines = [
-                f"将以 {mult}X 安装。倍率是我们直接下发给 XeSS 帧生成的，",
-                "不再受游戏有没有开放倍率选项限制 —— 这是它和 DLSSG 引擎最大的区别。",
+                f"将以 {mult}X 安装。倍率由本工具下发给 XeSS 帧生成，",
+                "倍率的取值由本工具决定，与游戏是否提供倍率选项无关。",
             ]
             if mult > optiscaler.TEMPLATE_MAX_MULT:
                 lines.append(
@@ -965,7 +956,7 @@ class App(tk.Tk):
         self._run(work, done, status=f"正在按「{preset}」档扫描 {g.name} …")
 
     def _render_prediction(self, pred) -> None:
-        """把「这个游戏行不行」的判断显示出来 —— 装之前就能看到。"""
+        """把「这个游戏能不能开帧生成」的判定显示出来（DLSSG 引擎的判据）。"""
         if pred is None:
             return
         icon = {
@@ -977,13 +968,11 @@ class App(tk.Tk):
         self.detail.insert("end", f"\n{icon} {pred.headline}\n", pred.level.color)
         for r in pred.reasons:
             self.detail.insert("end", f"　　{r}\n", "dim")
-        if pred.advice:
-            self.detail.insert("end", "　　建议：", "dim")
-            for i, ln in enumerate(pred.advice.splitlines()):
-                if ln.strip():
-                    # 第一行跟在「建议：」后面，其余行自己起一行
-                    prefix = "" if i == 0 else "　　　　　"
-                    self.detail.insert("end", f"{prefix}{ln}\n", "dim")
+        # 说明性文字（旧字段名 advice）只作为事实补充列出，不加「建议」之类的抬头
+        note = getattr(pred, "advice", "") or ""
+        for ln in note.splitlines():
+            if ln.strip():
+                self.detail.insert("end", f"　　{ln}\n", "dim")
 
     def _on_select(self, _evt=None) -> None:
         sel = self.listbox.curselection()
@@ -1009,7 +998,7 @@ class App(tk.Tk):
         if not path:
             return
         exe = Path(path)
-        self._log(f"你指定的主程序：{exe}")
+        self._log(f"手动指定主程序：{exe}")
 
         def work():
             cand = games.analyse_one(exe)
@@ -1040,8 +1029,8 @@ class App(tk.Tk):
                     "这个主程序可能不合适",
                     f"{exe.name}\n\n{cand.api_label}\n\n"
                     + "\n".join(cand.api_counter or cand.reasons[:5])
-                    + "\n\n如果游戏确实支持帧生成，可能你选错了 EXE —— "
-                    "要找真正渲染画面的那个（通常在 Binaries\\Win64 之类目录里）。",
+                    + "\n\n若游戏确实支持帧生成，则所选 EXE 可能不对 —— "
+                    "需要的是真正渲染画面的那个（通常在 Binaries\\Win64 之类目录里）。",
                 )
             else:
                 self._log(f"✓ {exe.name}：{cand.api_label}，可以用", "ok")
@@ -1148,7 +1137,7 @@ class App(tk.Tk):
                     detail = f"Router={rec.get('router') or '—'}，入口 {rec.get('proxy') or '—'}"
                 self.detail.insert("end", f"\n✓ 已安装（{detail}）\n", "ok")
             else:
-                self.detail.insert("end", "\n⚠ 已安装但文件异常，建议卸载后重装\n", "warn")
+                self.detail.insert("end", "\n⚠ 已安装，但文件校验不通过\n", "warn")
             for c in vr.details:
                 if c.level != "ok":
                     self.detail.insert("end", f"　[{c.level}] {c.title}\n", "warn" if c.level == "warn" else "err")
@@ -1187,7 +1176,7 @@ class App(tk.Tk):
 
     def _collect(self):
         if self.selected is None:
-            messagebox.showinfo("请先选游戏", "请在左边列表里选一个游戏。")
+            messagebox.showinfo("未选择游戏", "左侧列表未选中任何游戏。")
             return None
         if not self.chosen_exe:
             messagebox.showwarning("无法安装", "没有定位到可用的游戏主程序。")
@@ -1220,15 +1209,11 @@ class App(tk.Tk):
             proxy, why = installer.auto_pick_proxy(target_dir, profile=prof)
 
         bilinear = 1 if self.sample_var.get().startswith("性能") else 0
-        lsel = self.loglv_var.get()
-        if lsel.startswith("关闭"):
-            lvl = 0
-        elif lsel.startswith("运行"):
-            lvl = 2
-        elif lsel.startswith("详细"):
-            lvl = 3
-        else:
-            lvl = 1
+        # 日志级别按括号里的数字取，不按文案匹配 ——
+        # 文案改过一次就踩过坑：标签写了「信息」而解析还在找「运行」，
+        # 结果选 2/3 级静默退回到 1 级，日志里什么都看不到。
+        m = re.search(r"Level=(\d+)", self.loglv_var.get())
+        lvl = int(m.group(1)) if m else 1
         return target_dir, proxy, why, router, bilinear, lvl, frames
 
     def _preflight_or_none(self, target_dir, proxy, router, quiet=False):
@@ -1250,7 +1235,7 @@ class App(tk.Tk):
 
     def _opti_target(self) -> Path | None:
         if self.selected is None:
-            messagebox.showinfo("请先选游戏", "请在左边列表里选一个游戏。")
+            messagebox.showinfo("未选择游戏", "左侧列表未选中任何游戏。")
             return None
         if not self.chosen_exe:
             messagebox.showwarning("无法安装", "没有定位到可用的游戏主程序。")
@@ -1383,7 +1368,7 @@ class App(tk.Tk):
             msg += "\n提醒：\n" + warn + "\n"
         msg += "\n确认开始安装吗？"
         if not messagebox.askyesno("确认安装", msg, icon="warning"):
-            self._log("用户取消了安装")
+            self._log("安装已取消")
             return
         self._opti_install_now(target_dir, bundle)
 
@@ -1497,7 +1482,7 @@ class App(tk.Tk):
                 "要继续吗？出问题时可以随时「卸载并还原」，不会损坏游戏。",
                 icon="warning",
             ):
-                self._log("用户取消了安装（20 系实验性提醒）")
+                self._log("已在 20 系提示处取消")
                 return
 
         # 帧生成硬性前置条件：HAGS 关闭时游戏一定会说"显卡不支持"
@@ -1508,8 +1493,8 @@ class App(tk.Tk):
                 "这是 DLSS 帧生成的硬性系统前置条件。不开启的话，"
                 "即使 Mod 正确安装，游戏也会提示\n"
                 "「您的显卡不支持 DLSS 帧生成技术」。\n\n"
-                "要现在帮你开启吗？（需要管理员权限，改完要重启电脑）\n\n"
-                "选「否」会继续安装，但游戏里很可能仍然开不了帧生成。",
+                "是否现在开启？（需要管理员权限，修改后需重启电脑）\n\n"
+                "选「否」会继续安装，但游戏内很可能仍然无法开启帧生成。",
                 icon="warning",
             ):
                 self.do_enable_hags()
@@ -1525,7 +1510,7 @@ class App(tk.Tk):
                 "还要继续安装吗？",
                 icon="warning",
             ):
-                self._log("用户取消了安装（游戏可能不支持）")
+                self._log("已在兼容性提示处取消")
                 return
 
         if not pf.ok:
@@ -1542,7 +1527,7 @@ class App(tk.Tk):
                 if messagebox.askyesno(
                     "检测到反作弊组件",
                     f"{detail}\n\n给带反作弊的游戏注入 DLL 可能导致账号被封。\n"
-                    "你真的要冒险继续吗？",
+                    "确认继续？",
                     icon="warning", default="no",
                 ):
                     self._install_now(target_dir, proxy, router, bilinear, lvl, frames, force=True)
@@ -1564,7 +1549,7 @@ class App(tk.Tk):
             msg += "\n提醒：\n" + warn
         msg += "\n确认开始安装吗？"
         if not messagebox.askyesno("确认安装", msg):
-            self._log("用户取消了安装")
+            self._log("安装已取消")
             return
         self._install_now(target_dir, proxy, router, bilinear, lvl, frames)
 
@@ -1604,7 +1589,7 @@ class App(tk.Tk):
 
     def do_uninstall(self) -> None:
         if self.selected is None or not self.chosen_exe:
-            messagebox.showinfo("请先选游戏", "请在左边列表里选一个游戏。")
+            messagebox.showinfo("未选择游戏", "左侧列表未选中任何游戏。")
             return
         target_dir = Path(self.chosen_exe).parent
         vr = installer.verify_any(target_dir)
@@ -1615,7 +1600,7 @@ class App(tk.Tk):
         which = installer.engine_of(rec) if rec else ""
         warn = ""
         if any(c.level == "warn" and "正在运行" in c.title for c in vr.details):
-            warn = "\n⚠ 检测到游戏正在运行，请先完全退出游戏，否则文件被占用会删除失败。\n"
+            warn = "\n⚠ 游戏正在运行：文件被占用会导致写入或删除失败。\n"
         if not messagebox.askyesno(
             "确认卸载",
             f"将从下面这个目录移除本工具的文件，并还原安装前的原始文件：\n\n{target_dir}\n"
@@ -1659,12 +1644,12 @@ class App(tk.Tk):
             "本操作只会修改注册表里的一个值：\n\n"
             "  HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers\n"
             "  HwSchMode : 1 → 2\n\n"
-            "这与你在「设置 → 系统 → 屏幕 → 显示卡 → 更改默认图形设置」里\n"
+            "等同于「设置 → 系统 → 屏幕 → 显示卡 → 更改默认图形设置」中的\n"
             "打开「硬件加速 GPU 计划」是完全同一件事，不涉及任何其他系统设置。\n\n"
             "⚠ 改完必须重启电脑才会生效。\n\n确认修改吗？",
             icon="warning",
         ):
-            self._log("用户取消了修改系统设置")
+            self._log("系统设置修改已取消")
             return
 
         ok, msg = winenv.set_hags(True)
