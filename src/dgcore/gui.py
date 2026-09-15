@@ -39,6 +39,21 @@ C_BG_OK = "#e6f4ea"
 C_BG_WARN = "#fff8e1"
 C_BG_ERR = "#fdecea"
 
+# 引擎下拉框的取值。DLSS 5 那一项不进下拉框 —— 它跟常规的 XeSS 多帧生成不是一回事
+# （目前与帧生成冲突），单独放到「实验性」区块里，免得混在一起被顺手选中。
+# 这三段文本同时也是 _engine_map 的键。
+ENGINE_CHOICE_DLSSG = "DLSSG（NVIDIA DLSS 帧生成）"
+ENGINE_CHOICE_XESS = "OptiScaler · XeSS 多帧生成"
+ENGINE_CHOICE_DLSS5 = "OptiScaler · DLSS 5 神经网络渲染 + XeSS"
+
+# 选中 DLSS 5 包时摆在界面上的那段说明。只写实测到的事实和后果。
+DLSS5_WARNING = (
+    "目前无法与帧生成同时使用 —— 实测开了它之后，帧生成虽然照常出帧"
+    "（计数器会涨），但生成的帧进不了画面，观感就是原生帧率。\n"
+    "另外它的模型是未签名的预览版组件，且必须在游戏内用叠加层快捷键开启"
+    "（写进 ini 会被回写、下次启动游戏可能起不来）。"
+)
+
 
 class Task:
     """把一个后台任务的结果送回主线程。"""
@@ -65,8 +80,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} v{VERSION}")
-        self.geometry("1000x780")
-        self.minsize(900, 680)
+        self.geometry("1020x840")
+        self.minsize(900, 780)
 
         self.q: queue.Queue = queue.Queue()
         self.task = Task(self, "main")
@@ -91,11 +106,13 @@ class App(tk.Tk):
 
         # 引擎选择：两个引擎族互斥，同一个游戏目录只能装一个
         self._engine_map: dict[str, tuple[str, str]] = {
-            "DLSSG（NVIDIA DLSS 帧生成）": (state.ENGINE_DLSSG, ""),
-            "OptiScaler · XeSS 多帧生成": (state.ENGINE_OPTISCALER, "optiscaler-xess"),
-            "OptiScaler · DLSS 5 神经网络渲染 + XeSS": (state.ENGINE_OPTISCALER, "optiscaler-dlss5"),
+            ENGINE_CHOICE_DLSSG: (state.ENGINE_DLSSG, ""),
+            ENGINE_CHOICE_XESS: (state.ENGINE_OPTISCALER, "optiscaler-xess"),
+            ENGINE_CHOICE_DLSS5: (state.ENGINE_OPTISCALER, "optiscaler-dlss5"),
         }
-        self.engine_var = tk.StringVar(value="DLSSG（NVIDIA DLSS 帧生成）")
+        self.engine_var = tk.StringVar(value=ENGINE_CHOICE_DLSSG)
+        # 实验性那段警告的换行宽度，跟着窗口走（见 _on_wrap）
+        self._wrap_w = 0
 
         self._build()
         self.after(80, self._pump)
@@ -120,8 +137,8 @@ class App(tk.Tk):
         root = ttk.Frame(self, padding=10)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
-        root.rowconfigure(6, weight=1)
+        # 分页在上、日志在下：日志区不属于任何一页，切标签页也不会跟着切走
+        root.rowconfigure(1, weight=1)
 
         # ---------------- 标题 ----------------
         head = ttk.Frame(root)
@@ -134,9 +151,25 @@ class App(tk.Tk):
             font=FONT, foreground=C_DIM,
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
+        # ---------------- 分页 ----------------
+        # 三段分开：先看环境能不能用 → 再挑游戏装 → 平时不动的旋钮丢到高级。
+        # 日志区留在分页外面，三页都看得见。
+        nb = ttk.Notebook(root)
+        nb.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        tab_env = ttk.Frame(nb, padding=10)
+        tab_game = ttk.Frame(nb, padding=10)
+        tab_adv = ttk.Frame(nb, padding=10)
+        nb.add(tab_env, text=" 环境 ")
+        nb.add(tab_game, text=" 游戏与安装 ")
+        nb.add(tab_adv, text=" 高级 ")
+        for _tab in (tab_env, tab_adv):
+            _tab.columnconfigure(0, weight=1)
+        tab_game.columnconfigure(0, weight=1)
+        tab_game.rowconfigure(1, weight=1)
+
         # ---------------- ① 环境 ----------------
-        env_box = ttk.LabelFrame(root, text=" ① 你的电脑环境 ", padding=10)
-        env_box.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        env_box = ttk.LabelFrame(tab_env, text=" 你的电脑环境 ", padding=10)
+        env_box.grid(row=0, column=0, sticky="ew")
         env_box.columnconfigure(0, weight=1)
 
         self.env_frame = tk.Frame(env_box, bg=C_BG_WARN, bd=1, relief="solid")
@@ -167,9 +200,80 @@ class App(tk.Tk):
         self.btn_selftest = ttk.Button(btns, text="安全自检", command=self.do_selftest)
         self.btn_selftest.pack(side="right", padx=(0, 6))
 
+        ttk.Label(
+            tab_env,
+            text="硬件加速 GPU 计划（HAGS）是帧生成的硬性前置条件，状态就在上面那段里。\n"
+                 "这一页没问题之后，去「游戏与安装」页挑游戏。",
+            font=FONT, foreground=C_DIM, justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        # ---------------- 安装设置（引擎 + 倍率） ----------------
+        # 引擎和倍率决定下面所有选项的含义，也是日常真正要动的东西，
+        # 所以摆在「游戏与安装」页最上面。
+        setup = ttk.LabelFrame(tab_game, text=" 安装设置 ", padding=10)
+        setup.grid(row=0, column=0, sticky="ew")
+        for col in (1, 3):
+            setup.columnconfigure(col, weight=1)
+
+        ttk.Label(setup, text="帧生成引擎：", font=FONT).grid(row=0, column=0, sticky="w")
+        self.engine_combo = ttk.Combobox(
+            setup, textvariable=self.engine_var, font=FONT, state="readonly",
+            # DLSS 5 那个包不在下拉框里 —— 它是彩蛋，单独放在下面的「实验性」区块
+            values=[ENGINE_CHOICE_DLSSG, ENGINE_CHOICE_XESS],
+        )
+        self.engine_combo.grid(row=0, column=1, columnspan=3, sticky="ew")
+        self.engine_combo.bind("<<ComboboxSelected>>", self._on_engine_change)
+
+        self.engine_hint = ttk.Label(setup, text="", font=FONT, foreground=C_DIM, justify="left")
+        self.engine_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        # DLSS 5 单独框起来：它和 XeSS 多帧生成不是一回事（现在跟帧生成冲突），
+        # 混在下拉框里容易被顺手选中，然后觉得「装了没用」。
+        self.dlss5_box = ttk.LabelFrame(
+            setup, text=" 实验性（有已知问题，想折腾再看） ", padding=(8, 6)
+        )
+        self.dlss5_box.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.dlss5_box.columnconfigure(0, weight=1)
+        self.dlss5_var = tk.BooleanVar(value=False)
+        self.dlss5_check = ttk.Checkbutton(
+            self.dlss5_box,
+            text="改用 OptiScaler · DLSS 5 神经网络渲染（替代上面的 XeSS 多帧生成）",
+            variable=self.dlss5_var, command=self._on_dlss5_toggle,
+        )
+        self.dlss5_check.grid(row=0, column=0, sticky="w")
+
+        # 这段警告只在真选中这个包时出现，平时收起来，不占地方也不吓人
+        self.dlss5_warn = ttk.Frame(self.dlss5_box)
+        self.dlss5_warn.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.dlss5_warn.columnconfigure(0, weight=1)
+        ttk.Label(
+            self.dlss5_warn, text="实验性：DLSS 5 神经网络渲染",
+            font=FONT_B, foreground=C_WARN,
+        ).grid(row=0, column=0, sticky="w")
+        self.dlss5_note = ttk.Label(
+            self.dlss5_warn, text=DLSS5_WARNING, font=FONT, foreground=C_WARN,
+            justify="left", wraplength=700,
+        )
+        self.dlss5_note.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        self.dlss5_warn.bind("<Configure>", self._on_wrap)
+        self.dlss5_warn.grid_remove()
+
+        # 倍率上限：这是评论区明确要求加的功能（0.3.0 最高 6X）
+        ttk.Label(setup, text="最高倍率：", font=FONT).grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.frames_combo = ttk.Combobox(
+            setup, textvariable=self.frames_var, font=FONT, state="readonly",
+            values=list(installer.FRAME_OPTIONS),
+        )
+        self.frames_combo.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+        # 倍率一变，下面的说明（尤其是"实验性档位"警告）要跟着变
+        self.frames_combo.bind("<<ComboboxSelected>>", self._on_frames_change)
+
+        self.frames_hint = ttk.Label(setup, text="", font=FONT, foreground=C_DIM, justify="left")
+        self.frames_hint.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
         # ---------------- ② 选游戏 ----------------
-        game_box = ttk.LabelFrame(root, text=" ② 选择要开启帧生成的游戏 ", padding=10)
-        game_box.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        game_box = ttk.LabelFrame(tab_game, text=" 选择要开启帧生成的游戏 ", padding=10)
+        game_box.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         game_box.columnconfigure(0, weight=0, minsize=290)
         game_box.columnconfigure(1, weight=1)
         game_box.rowconfigure(1, weight=1)
@@ -194,6 +298,9 @@ class App(tk.Tk):
         self.listbox = tk.Listbox(
             left, font=FONT, activestyle="none", exportselection=False,
             selectmode="browse", bd=1, relief="solid", highlightthickness=0,
+            # 只给 6 行的最小高度：窗口拉小、或实验性那段警告展开时，
+            # 列表被挤扁也不会把下面的按钮顶出可见范围
+            height=6,
         )
         self.listbox.grid(row=0, column=0, sticky="nsew")
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
@@ -206,7 +313,7 @@ class App(tk.Tk):
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=1)
         self.detail = tk.Text(
-            right, font=FONT, wrap="word", height=9, bd=1, relief="solid",
+            right, font=FONT, wrap="word", height=7, bd=1, relief="solid",
             highlightthickness=0, state="disabled", cursor="arrow",
             background="#fbfbfd",
         )
@@ -226,23 +333,53 @@ class App(tk.Tk):
         self.exe_combo.grid(row=0, column=1, sticky="ew")
         self.exe_combo.bind("<<ComboboxSelected>>", self._on_exe_change)
 
-        # ---------------- ③ 选项 ----------------
-        opt = ttk.LabelFrame(root, text=" ③ 选项（默认值适合绝大多数人，不用改） ", padding=10)
-        opt.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        # ---------------- ③ 高级 ----------------
+        # 平时不用动的旋钮全在这页，主流程那页就不会被淹掉。
+        opt = ttk.LabelFrame(tab_adv, text=" 高级选项（默认值适合绝大多数人，不用改） ", padding=10)
+        opt.grid(row=0, column=0, sticky="ew")
         for col in (1, 3):
             opt.columnconfigure(col, weight=1)
 
-        # 引擎选择放在最上面 —— 它决定了下面所有选项的含义
-        ttk.Label(opt, text="帧生成引擎：", font=FONT).grid(row=0, column=0, sticky="w")
-        self.engine_combo = ttk.Combobox(
-            opt, textvariable=self.engine_var, font=FONT, state="readonly",
-            values=list(self._engine_map.keys()),
+        ttk.Label(opt, text="计算路由：", font=FONT).grid(row=0, column=0, sticky="w")
+        self.router_combo = ttk.Combobox(
+            opt, textvariable=self.router_var, font=FONT, state="readonly",
+            values=["自动（按显卡判断）", "SM86（RTX 30 系列）", "SM75（RTX 20 系列，实验性）"],
         )
-        self.engine_combo.grid(row=0, column=1, columnspan=3, sticky="ew")
-        self.engine_combo.bind("<<ComboboxSelected>>", self._on_engine_change)
+        self.router_combo.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        self.router_combo.bind("<<ComboboxSelected>>", self._on_router_change)
 
-        self.engine_hint = ttk.Label(opt, text="", font=FONT, foreground=C_DIM)
-        self.engine_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Label(opt, text="代理入口：", font=FONT).grid(row=0, column=2, sticky="w")
+        self.proxy_combo = ttk.Combobox(
+            opt, textvariable=self.proxy_var, font=FONT, state="readonly",
+            values=["自动选择"] + list(profiles.PROFILE_024.proxy_names),
+        )
+        self.proxy_combo.grid(row=0, column=3, sticky="ew")
+
+        ttk.Label(opt, text="采样档：", font=FONT).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.sample_combo = ttk.Combobox(
+            opt, textvariable=self.sample_var, font=FONT, state="readonly",
+            values=["精确档（推荐，HardwareBilinear=0）", "性能档（近似采样，HardwareBilinear=1，仅 SM86）"],
+        )
+        self.sample_combo.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+
+        ttk.Label(opt, text="日志级别：", font=FONT).grid(row=1, column=2, sticky="w", pady=(6, 0))
+        ttk.Combobox(
+            opt, textvariable=self.loglv_var, font=FONT, state="readonly",
+            values=["仅记录错误（Level=1）", "关闭日志（Level=0）", "运行诊断（Level=2）", "详细日志（Level=3）"],
+        ).grid(row=1, column=3, sticky="ew", pady=(6, 0))
+
+        ttk.Label(opt, text="扫描档位：", font=FONT).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.preset_combo = ttk.Combobox(
+            opt, textvariable=self.preset_var, font=FONT, state="readonly",
+            values=list(games.SCAN_PRESETS.keys()),
+        )
+        self.preset_combo.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
+        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
+
+        # 上面这几项都只作用于 DLSSG 引擎，切到 OptiScaler 时要说清楚，
+        # 免得看到一片置灰以为界面坏了
+        self.advanced_hint = ttk.Label(opt, text="", font=FONT, foreground=C_DIM, justify="left")
+        self.advanced_hint.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         # 运动矢量分辨率：OptiScaler 引擎专有。默认开着 —— 实测黑神话这类 UE5
         # 游戏不设它的话，XeFG 每帧都因 MV/深度分辨率不匹配而失败（表现为"没效果"）。
@@ -251,56 +388,7 @@ class App(tk.Tk):
             opt, text="运动矢量按高分辨率处理（HighResMV，默认不改；画面异常时可试）",
             variable=self.hiresmv_var,
         )
-        self.hiresmv_check.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
-
-        ttk.Label(opt, text="计算路由：", font=FONT).grid(row=3, column=0, sticky="w", pady=(6, 0))
-        self.router_combo = ttk.Combobox(
-            opt, textvariable=self.router_var, font=FONT, state="readonly",
-            values=["自动（按显卡判断）", "SM86（RTX 30 系列）", "SM75（RTX 20 系列，实验性）"],
-        )
-        self.router_combo.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
-        self.router_combo.bind("<<ComboboxSelected>>", self._on_router_change)
-
-        ttk.Label(opt, text="代理入口：", font=FONT).grid(row=3, column=2, sticky="w", pady=(6, 0))
-        self.proxy_combo = ttk.Combobox(
-            opt, textvariable=self.proxy_var, font=FONT, state="readonly",
-            values=["自动选择"] + list(profiles.PROFILE_024.proxy_names),
-        )
-        self.proxy_combo.grid(row=3, column=3, sticky="ew", pady=(6, 0))
-
-        # 倍率上限：这是评论区明确要求加的功能（0.3.0 最高 6X）
-        ttk.Label(opt, text="最高倍率：", font=FONT).grid(row=4, column=0, sticky="w", pady=(6, 0))
-        self.frames_combo = ttk.Combobox(
-            opt, textvariable=self.frames_var, font=FONT, state="readonly",
-            values=list(installer.FRAME_OPTIONS),
-        )
-        self.frames_combo.grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
-        # 倍率一变，下面的说明（尤其是"实验性档位"警告）要跟着变
-        self.frames_combo.bind("<<ComboboxSelected>>", self._on_frames_change)
-
-        ttk.Label(opt, text="采样档：", font=FONT).grid(row=4, column=2, sticky="w", pady=(6, 0))
-        self.sample_combo = ttk.Combobox(
-            opt, textvariable=self.sample_var, font=FONT, state="readonly",
-            values=["精确档（推荐，HardwareBilinear=0）", "性能档（近似采样，HardwareBilinear=1，仅 SM86）"],
-        )
-        self.sample_combo.grid(row=4, column=3, sticky="ew", pady=(6, 0))
-
-        ttk.Label(opt, text="扫描档位：", font=FONT).grid(row=5, column=0, sticky="w", pady=(6, 0))
-        self.preset_combo = ttk.Combobox(
-            opt, textvariable=self.preset_var, font=FONT, state="readonly",
-            values=list(games.SCAN_PRESETS.keys()),
-        )
-        self.preset_combo.grid(row=5, column=1, sticky="ew", padx=(0, 12), pady=(6, 0))
-        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
-
-        ttk.Label(opt, text="日志级别：", font=FONT).grid(row=4, column=2, sticky="w", pady=(6, 0))
-        ttk.Combobox(
-            opt, textvariable=self.loglv_var, font=FONT, state="readonly",
-            values=["仅记录错误（Level=1）", "关闭日志（Level=0）", "运行诊断（Level=2）", "详细日志（Level=3）"],
-        ).grid(row=4, column=3, sticky="ew", pady=(6, 0))
-
-        self.frames_hint = ttk.Label(opt, text="", font=FONT, foreground=C_DIM)
-        self.frames_hint.grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.hiresmv_check.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         # 共存模式：允许 DLSSG 引擎与 OptiScaler 引擎装在同一个目录。
         # 两者各用各的代理入口（DLSSG 用 version.dll、OptiScaler 用 dxgi.dll），
@@ -314,11 +402,11 @@ class App(tk.Tk):
             opt, text="与 DLSSG 引擎共存（帧生成改走 DLSS 流输入，倍率仍由本引擎决定）",
             variable=self.coexist_var,
         )
-        self.coexist_check.grid(row=7, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.coexist_check.grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
-        # ---------------- 操作按钮 ----------------
-        act = ttk.Frame(root)
-        act.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        # ---------------- 操作按钮（属于「游戏与安装」页） ----------------
+        act = ttk.Frame(tab_game)
+        act.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         act.columnconfigure(4, weight=1)
         self.btn_preview = ttk.Button(act, text="预览将要做的改动", command=self.do_preview)
         self.btn_preview.grid(row=0, column=0)
@@ -329,13 +417,13 @@ class App(tk.Tk):
         self.installed_label = ttk.Label(act, text="", font=FONT, foreground=C_DIM)
         self.installed_label.grid(row=0, column=3, padx=(12, 0), sticky="w")
 
-        # ---------------- 日志 ----------------
+        # ---------------- 日志（三页共用，切标签页也不消失） ----------------
         logbox = ttk.LabelFrame(root, text=" 运行日志 ", padding=(6, 4))
-        logbox.grid(row=6, column=0, sticky="nsew", pady=(10, 0))
+        logbox.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
         logbox.columnconfigure(0, weight=1)
         logbox.rowconfigure(0, weight=1)
         self.logtext = tk.Text(
-            logbox, font=FONT_M, height=9, wrap="word", bd=0, state="disabled",
+            logbox, font=FONT_M, height=7, wrap="word", bd=0, state="disabled",
             background="#1e1e24", foreground="#d6d6d6", insertbackground="#d6d6d6",
         )
         self.logtext.grid(row=0, column=0, sticky="nsew")
@@ -348,7 +436,7 @@ class App(tk.Tk):
         self.logtext.tag_configure("dim", foreground="#8b949e")
 
         self.status = ttk.Label(root, text="就绪", font=FONT, foreground=C_DIM, anchor="w")
-        self.status.grid(row=7, column=0, sticky="ew", pady=(6, 0))
+        self.status.grid(row=3, column=0, sticky="ew", pady=(6, 0))
 
     # ------------------------------------------------------------------
     # 基础设施
@@ -547,6 +635,31 @@ class App(tk.Tk):
         self._sync_engine_widgets()
         self._render_detail()
 
+    def _on_dlss5_toggle(self) -> None:
+        """「实验性」勾选框：勾上就换成 DLSS 5 包，取消就退回 XeSS 包。
+
+        它和下拉框改的是同一个 engine_var，所以两边不会各说各话。
+        """
+        if bool(self.dlss5_var.get()):
+            if self.engine_var.get() != ENGINE_CHOICE_DLSS5:
+                self.engine_var.set(ENGINE_CHOICE_DLSS5)
+        elif self.engine_var.get() == ENGINE_CHOICE_DLSS5:
+            # 只在当前确实是 DLSS 5 时退回 XeSS；如果用户在下拉框里选了别的
+            # 引擎（DLSSG），这里什么都不用做
+            self.engine_var.set(ENGINE_CHOICE_XESS)
+        self._sync_engine_widgets()
+        self._render_detail()
+
+    def _on_wrap(self, evt) -> None:
+        """实验性那段警告跟着窗口宽度换行（只在宽度真的变了时才写，免得来回触发）。"""
+        w = max(320, int(evt.width) - 40)
+        if w != self._wrap_w:
+            self._wrap_w = w
+            try:
+                self.dlss5_note.configure(wraplength=w)
+            except tk.TclError:
+                pass
+
     def _on_frames_change(self, _evt=None) -> None:
         """倍率变了 → 刷新说明文字。"""
         self._sync_profile_widgets()
@@ -600,6 +713,29 @@ class App(tk.Tk):
             self.coexist_check.configure(state="normal" if is_opti else "disabled")
         except tk.TclError:
             pass
+        # 实验性区块：勾选框状态始终跟着当前引擎走，那段警告只在真的选中
+        # DLSS 5 包时摆出来（平时收起来，不占地方）
+        is_dlss5 = is_opti and bundle == "optiscaler-dlss5"
+        try:
+            self.dlss5_var.set(is_dlss5)
+            if is_dlss5:
+                self.dlss5_warn.grid()
+            else:
+                self.dlss5_warn.grid_remove()
+        except tk.TclError:
+            pass
+        # 高级页那几个旋钮只作用于 DLSSG 引擎，切到 OptiScaler 时说明一句，
+        # 免得看见一片置灰以为界面坏了
+        try:
+            self.advanced_hint.configure(
+                text=("当前是 OptiScaler 引擎：计算路由、代理入口、采样档、日志级别都是 "
+                      "DLSSG 引擎的概念，这一页的这几项用不上（已置灰）。"
+                      if is_opti else
+                      "计算路由、代理入口、采样档、日志级别只作用于 DLSSG 引擎；"
+                      "「最高倍率」在「游戏与安装」页。")
+            )
+        except tk.TclError:
+            pass
 
         # 引擎说明
         if is_opti:
@@ -611,8 +747,8 @@ class App(tk.Tk):
                 self.engine_hint.configure(text=f"引擎包不完整：{msg}", foreground=C_ERR)
             elif bundle == "optiscaler-dlss5":
                 self.engine_hint.configure(
-                    text="DLSS 5 神经网络渲染 + XeSS 多帧生成。实验性：所用 nvngx_dlssnr.dll "
-                         "未签名、且不在你的驱动里。倍率由本工具直接设定。",
+                    text="已选中实验性引擎包：DLSS 5 神经网络渲染（详细情况见上面那段说明）。"
+                         "倍率由本工具直接设定。",
                     foreground=C_WARN,
                 )
             else:

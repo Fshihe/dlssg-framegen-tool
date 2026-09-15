@@ -457,6 +457,10 @@ def build_ini(key: str, multiplier: int = 4, extra_note: str = "",
         header.append("; 异常、也可能崩溃。出问题就退回 2X/3X/4X。")
     if key == "optiscaler-dlss5":
         header.append(";")
+        header.append("; 【目前无法与帧生成同时使用】实测：开了 NR 之后帧生成照常出帧")
+        header.append("; （计数器会涨到一百多），但生成的帧进不了画面 —— 观感就是原生帧率。")
+        header.append("; 要帧生成请改用「XeSS 多帧生成」那个引擎包；这个包只当神经网络渲染试用。")
+        header.append(";")
         header.append("; DLSS 5 神经网络渲染：实验性。所用 nvngx_dlssnr.dll 为未签名、")
         header.append("; 且不在你当前驱动里的预览版组件，请自行判断是否使用。")
         header.append(";")
@@ -1551,9 +1555,14 @@ def preflight(
 
     if bundle == "optiscaler-dlss5":
         out.append(Check(
-            "warn", "DLSS 5 神经网络渲染是实验性的",
-            "所用 nvngx_dlssnr.dll 是未签名、且不在你当前驱动里的预览版组件。"
-            "本工具只是把它装进游戏目录，不对此文件做任何修改；出问题卸载即可还原。",
+            "warn", "DLSS 5 神经网络渲染：实验性，而且目前无法与帧生成同时使用",
+            "实测（黑神话 / 帕鲁，RTX 3070）：开了 NR 之后帧生成照常出帧 —— 日志里 "
+            "Interpolation count 在变、计数器会涨到一百多 —— 但**生成的帧进不了画面**，"
+            "肉眼观感就是原生帧率。\n\n"
+            "所以要帧生成就用「XeSS 多帧生成」那个引擎包；这个包只当神经网络渲染试用。\n\n"
+            "另外两点：所用 nvngx_dlssnr.dll 是未签名、且不在你当前驱动里的预览版组件"
+            "（本工具只是原样装进游戏目录，不做任何修改）；它必须在游戏内用叠加层快捷键"
+            "开启，写进 ini 会被回写、下次启动游戏可能起不来。",
         ))
 
     return out
